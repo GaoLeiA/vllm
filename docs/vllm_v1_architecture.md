@@ -361,73 +361,63 @@ vLLM V1 架构的核心设计理念：
 
 ---
 
-## 📊 架构图索引
+## 📊 架构图
 
-本文档配套以下架构图，位于项目 artifacts 目录：
+本文档配套以下架构图，位于 `docs/images/` 目录：
 
-### 1. **vLLM V1 整体架构图** (`vllm_v1_architecture.png`)
-展示 V1 的分层架构设计，包括：
-- API 层 (蓝色)
-- 引擎层 (紫色)
-- 核心层 (绿色)
-- 执行器层 (橙色)
-- 工作节点层 (红色/粉色)
-- 核心组件层 (青色)
+### 1. vLLM V1 整体架构图
 
-### 2. **模块依赖与数据流图** (`vllm_v1_modules.png`)
-展示各模块之间的交互关系：
-- VllmConfig 配置中心
-- 请求处理流水线
-- EngineCore 核心循环
-- 执行器与工作节点关系
-- 高级功能模块
+展示 V1 的分层架构设计，包括 API 层、引擎层、核心层、执行器层、工作节点层和核心组件层。
 
-### 3. **注意力后端架构图** (`vllm_attention_backends.png`)
-详细展示注意力机制实现：
-- AttentionBackend 抽象基类
-- 12+ 种后端实现
-- NVIDIA GPU 优化后端 (FlashAttention, FlashInfer)
-- 特殊注意力类型 (Tree, Flex, GDN)
-- 替代硬件支持 (ROCm, CPU, MLA)
-- 状态空间模型 (Mamba, Mamba2)
+![vLLM V1 整体架构](./images/vllm_v1_architecture.png)
 
-### 4. **KV Cache 架构图** (`vllm_kv_cache.png`)
-PagedAttention 和缓存管理：
-- GPU 内存布局
-- PagedAttention vs 传统方式对比
-- 逻辑到物理块映射
-- 核心组件 (KVCacheManager, BlockPool, KVCacheCoordinator)
-- 前缀缓存树结构
-- 块结构详情
-- KV Offload 分层架构
+---
 
-### 5. **推测解码架构图** (`vllm_spec_decode.png`)
-推测解码加速技术：
-- 传统自回归 vs 推测解码对比
-- Draft Proposers (EAGLE, Medusa, Ngram)
-- RejectionSampler 验证逻辑
-- EAGLE 深入解析与树结构
-- Tree Attention 验证矩阵
-- 性能指标
+### 2. 模块依赖与数据流图
 
-### 6. **调度器架构图** (`vllm_scheduler.png`)
-连续批处理和调度：
-- 静态批处理 vs 连续批处理对比
-- 请求状态机 (WAITING → RUNNING → FINISHED/SWAPPED)
-- Scheduler 核心类结构
-- schedule() 算法流程
-- SchedulerOutput 数据结构
-- Chunked Prefill 分块预填充
+展示各模块之间的交互关系：VllmConfig 配置中心、请求处理流水线、EngineCore 核心循环等。
 
-### 7. **完整请求流程图** (`vllm_complete_flow.png`)
-端到端请求处理流程：
-- 请求入口 → API Server → AsyncLLM
-- 输入处理 (Tokenize, 多模态)
-- EngineCore 调度循环
-- 执行分发 (单GPU/多GPU/分布式)
-- 模型执行 (GPUModelRunner)
-- 输出处理与解码
-- 响应返回
+![vLLM V1 模块依赖](./images/vllm_v1_modules.png)
+
+---
+
+### 3. 注意力后端架构图
+
+详细展示 20+ 种注意力后端实现：FlashAttention、FlashInfer、Tree Attention、Mamba 等。
+
+![vLLM 注意力后端](./images/vllm_attention_backends.png)
+
+---
+
+### 4. KV Cache 架构图
+
+PagedAttention 核心原理：GPU 内存布局、逻辑到物理块映射、前缀缓存、KV Offload。
+
+![vLLM KV Cache](./images/vllm_kv_cache.png)
+
+---
+
+### 5. 推测解码架构图
+
+推测解码加速技术：EAGLE、Medusa、Ngram 提议器，拒绝采样验证流程。
+
+![vLLM 推测解码](./images/vllm_spec_decode.png)
+
+---
+
+### 6. 调度器架构图
+
+Continuous Batching 和调度：请求状态机、Scheduler 核心逻辑、Chunked Prefill。
+
+![vLLM 调度器](./images/vllm_scheduler.png)
+
+---
+
+### 7. 完整请求流程图
+
+端到端请求处理：从 JSON 请求到响应返回的完整数据流。
+
+![vLLM 完整流程](./images/vllm_complete_flow.png)
 
 ---
 
