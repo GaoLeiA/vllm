@@ -42,7 +42,7 @@
 
 ### 架构概览
 
-![Worker Architecture](worker_architecture.png)
+![Worker Architecture](images/worker_architecture.png)
 
 *图1: vLLM V1 Worker 架构图 - 展示类层次结构、核心组件和初始化流程*
 
@@ -269,7 +269,7 @@ class CachedRequestState:
 
 ### 核心概念
 
-![InputBatch Optimization](input_batch_optimization.png)
+![InputBatch Optimization](images/input_batch_optimization.png)
 
 *图3: InputBatch 持久化批次优化 - 对比传统方式和增量更新方式的性能差异*
 
@@ -475,7 +475,7 @@ def condense(self) -> None:
 
 ### execute_model 主流程
 
-![Model Runner Flow](model_runner_flow.png)
+![Model Runner Flow](images/model_runner_flow.png)
 
 *图2: GPUModelRunner execute_model() 执行流程 - 从状态更新到采样的完整流程*
 
@@ -697,7 +697,7 @@ def _execute_sampler(
 
 ### 执行时间线图
 
-![Worker Execution Timeline](worker_execution_timeline.png)
+![Worker Execution Timeline](images/worker_execution_timeline.png)
 
 *图4: Worker 执行时间线 - 展示 LLaMA-70B 模型在 TP=4 配置下的各阶段耗时*
 
