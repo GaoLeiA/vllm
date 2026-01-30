@@ -286,8 +286,10 @@ class LLMEngine:
             return []
 
         # 1) Get EngineCoreOutput from the EngineCore.
+        print(f"\n[DEBUG] Entering step()... Unfinished requests: {self.get_num_unfinished_requests()}") # <--- ADDED
         with record_function_or_nullcontext("llm_engine step: get_output"):
             outputs = self.engine_core.get_output()
+            print(f"[DEBUG] Core returned outputs. Timestamp: {outputs.timestamp}") # <--- ADDED
 
         # 2) Process EngineCoreOutputs.
         with record_function_or_nullcontext("llm_engine step: process_outputs"):
