@@ -263,53 +263,58 @@ def inject_logging_hooks():
 
 def print_model_summary(llm):
     """打印模型配置摘要"""
-    from vllm.distributed import get_tensor_model_parallel_world_size
-    
-    model_config = llm.llm_engine.model_config
-    parallel_config = llm.llm_engine.parallel_config
-    
-    study_logger.info(
-        f"\n{'='*70}\n"
-        f"📊 模型配置摘要\n"
-        f"{'='*70}\n"
-        f"模型名称: {model_config.model}\n"
-        f"模型架构: {model_config.architectures}\n"
-        f"隐藏层维度: {model_config.get_hidden_size()}\n"
-        f"层数: {model_config.get_num_layers()}\n"
-        f"注意力头数: {model_config.get_num_attention_heads()}\n"
-        f"KV 头数: {model_config.get_num_kv_heads()}\n"
-        f"词汇表大小: {model_config.get_vocab_size()}\n"
-        f"最大序列长度: {model_config.max_model_len}\n"
-        f"{'='*70}\n"
-        f"📊 并行配置\n"
-        f"{'='*70}\n"
-        f"Tensor Parallel Size: {parallel_config.tensor_parallel_size}\n"
-        f"Pipeline Parallel Size: {parallel_config.pipeline_parallel_size}\n"
-        f"Data Parallel Size: {parallel_config.data_parallel_size}\n"
-        f"{'='*70}"
-    )
+    try:
+        # vLLM v1 API: 使用 vllm_config
+        vllm_config = llm.llm_engine.vllm_config
+        model_config = vllm_config.model_config
+        parallel_config = vllm_config.parallel_config
+        
+        study_logger.info(
+            f"\n{'='*70}\n"
+            f"📊 模型配置摘要\n"
+            f"{'='*70}\n"
+            f"模型名称: {model_config.model}\n"
+            f"模型架构: {model_config.architectures}\n"
+            f"隐藏层维度: {model_config.get_hidden_size()}\n"
+            f"层数: {model_config.get_num_layers()}\n"
+            f"注意力头数: {model_config.get_num_attention_heads()}\n"
+            f"KV 头数: {model_config.get_num_kv_heads()}\n"
+            f"词汇表大小: {model_config.get_vocab_size()}\n"
+            f"最大序列长度: {model_config.max_model_len}\n"
+            f"{'='*70}\n"
+            f"📊 并行配置\n"
+            f"{'='*70}\n"
+            f"Tensor Parallel Size: {parallel_config.tensor_parallel_size}\n"
+            f"Pipeline Parallel Size: {parallel_config.pipeline_parallel_size}\n"
+            f"Data Parallel Size: {parallel_config.data_parallel_size}\n"
+            f"{'='*70}"
+        )
+    except AttributeError as e:
+        # 尝试旧版 API
+        try:
+            model_config = llm.llm_engine.model_config
+            study_logger.info(
+                f"\n{'='*70}\n"
+                f"📊 模型配置摘要 (简化版)\n"
+                f"{'='*70}\n"
+                f"模型名称: {model_config.model}\n"
+                f"模型架构: {model_config.architectures}\n"
+                f"{'='*70}"
+            )
+        except Exception as e2:
+            study_logger.warning(f"无法获取模型配置: {e2}")
 
 
 def analyze_weight_distribution(llm):
-    """分析权重在不同 GPU 上的分布"""
-    try:
-        model = llm.llm_engine.model_executor.driver_worker.model_runner.model
-        
-        study_logger.info("\n" + "="*70)
-        study_logger.info("📊 权重分布分析 (部分层)")
-        study_logger.info("="*70)
-        
-        # 只看前2层作为示例
-        for name, param in list(model.named_parameters())[:20]:
-            if 'layers.0.' in name or 'layers.1.' in name:
-                study_logger.info(
-                    f"{name}:\n"
-                    f"    ├── shape: {param.shape}\n"
-                    f"    ├── dtype: {param.dtype}\n"
-                    f"    └── device: {param.device}"
-                )
-    except Exception as e:
-        study_logger.warning(f"无法分析权重分布: {e}")
+    """分析权重在不同 GPU 上的分布 (v1 引擎可能不支持直接访问)"""
+    study_logger.info("\n" + "="*70)
+    study_logger.info("📊 权重分布分析")
+    study_logger.info("="*70)
+    study_logger.info(
+        "💡 提示: 在 vLLM v1 架构中，模型运行在独立的 Worker 进程中，\n"
+        "    主进程无法直接访问模型权重。请查看 Worker 进程的日志来观察权重分片。\n"
+        "    你可以在上面的初始化日志中看到每个 TP rank 的 QKV 分片信息。"
+    )
 
 
 def run_inference_with_logging(llm, prompts):
