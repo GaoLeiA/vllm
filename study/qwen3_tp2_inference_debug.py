@@ -269,17 +269,24 @@ def print_model_summary(llm):
         model_config = vllm_config.model_config
         parallel_config = vllm_config.parallel_config
         
+        # 获取模型配置（注意：某些方法需要 parallel_config 参数）
+        hidden_size = model_config.get_hidden_size()
+        num_layers = model_config.get_num_layers(parallel_config)
+        num_attention_heads = model_config.get_num_attention_heads()
+        num_kv_heads = model_config.get_num_kv_heads()
+        vocab_size = model_config.get_vocab_size()
+        
         study_logger.info(
             f"\n{'='*70}\n"
             f"📊 模型配置摘要\n"
             f"{'='*70}\n"
             f"模型名称: {model_config.model}\n"
             f"模型架构: {model_config.architectures}\n"
-            f"隐藏层维度: {model_config.get_hidden_size()}\n"
-            f"层数: {model_config.get_num_layers()}\n"
-            f"注意力头数: {model_config.get_num_attention_heads()}\n"
-            f"KV 头数: {model_config.get_num_kv_heads()}\n"
-            f"词汇表大小: {model_config.get_vocab_size()}\n"
+            f"隐藏层维度: {hidden_size}\n"
+            f"层数: {num_layers}\n"
+            f"注意力头数: {num_attention_heads}\n"
+            f"KV 头数: {num_kv_heads}\n"
+            f"词汇表大小: {vocab_size}\n"
             f"最大序列长度: {model_config.max_model_len}\n"
             f"{'='*70}\n"
             f"📊 并行配置\n"
@@ -287,18 +294,24 @@ def print_model_summary(llm):
             f"Tensor Parallel Size: {parallel_config.tensor_parallel_size}\n"
             f"Pipeline Parallel Size: {parallel_config.pipeline_parallel_size}\n"
             f"Data Parallel Size: {parallel_config.data_parallel_size}\n"
+            f"{'='*70}\n"
+            f"📊 每个 GPU 上的分片 (TP={parallel_config.tensor_parallel_size})\n"
+            f"{'='*70}\n"
+            f"注意力头数/GPU: {num_attention_heads} / {parallel_config.tensor_parallel_size} = {num_attention_heads // parallel_config.tensor_parallel_size}\n"
+            f"KV 头数/GPU: {num_kv_heads} / {parallel_config.tensor_parallel_size} = {num_kv_heads // parallel_config.tensor_parallel_size}\n"
             f"{'='*70}"
         )
-    except AttributeError as e:
-        # 尝试旧版 API
+    except Exception as e:
+        # 简化版输出
+        study_logger.warning(f"无法获取完整模型配置: {e}")
         try:
-            model_config = llm.llm_engine.model_config
+            vllm_config = llm.llm_engine.vllm_config
+            model_config = vllm_config.model_config
             study_logger.info(
                 f"\n{'='*70}\n"
                 f"📊 模型配置摘要 (简化版)\n"
                 f"{'='*70}\n"
                 f"模型名称: {model_config.model}\n"
-                f"模型架构: {model_config.architectures}\n"
                 f"{'='*70}"
             )
         except Exception as e2:

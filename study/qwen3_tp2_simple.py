@@ -80,22 +80,25 @@ def main():
         model_config = vllm_config.model_config
         parallel_config = vllm_config.parallel_config
         
+        # 获取模型配置（注意：get_num_layers 需要 parallel_config 参数）
+        hidden_size = model_config.get_hidden_size()
+        num_layers = model_config.get_num_layers(parallel_config)
+        num_heads = model_config.get_num_attention_heads()
+        num_kv_heads = model_config.get_num_kv_heads()
+        tp_size = parallel_config.tensor_parallel_size
+        
         print("\n📊 模型配置:")
         print(f"  模型: {model_config.model}")
-        print(f"  隐藏层维度: {model_config.get_hidden_size()}")
-        print(f"  层数: {model_config.get_num_layers()}")
-        print(f"  注意力头数: {model_config.get_num_attention_heads()}")
-        print(f"  KV 头数: {model_config.get_num_kv_heads()}")
+        print(f"  隐藏层维度: {hidden_size}")
+        print(f"  层数: {num_layers}")
+        print(f"  注意力头数: {num_heads}")
+        print(f"  KV 头数: {num_kv_heads}")
         
         print(f"\n📊 并行配置:")
-        print(f"  Tensor Parallel: {parallel_config.tensor_parallel_size}")
+        print(f"  Tensor Parallel: {tp_size}")
         print(f"  Pipeline Parallel: {parallel_config.pipeline_parallel_size}")
         
         # 计算分片后的配置
-        tp_size = parallel_config.tensor_parallel_size
-        num_heads = model_config.get_num_attention_heads()
-        num_kv_heads = model_config.get_num_kv_heads()
-        
         print(f"\n📊 每个 GPU 上的分片:")
         print(f"  注意力头数/GPU: {num_heads} / {tp_size} = {num_heads // tp_size}")
         print(f"  KV 头数/GPU: {num_kv_heads} / {tp_size} = {num_kv_heads // tp_size}")
