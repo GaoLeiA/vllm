@@ -27,74 +27,51 @@ from pathlib import Path
 VLLM_ROOT = Path(__file__).parent.parent / "vllm"
 
 # 需要修改的文件及其补丁
+# 注意：避免在会被 torch.compile 追踪的代码路径中添加动态属性修改！
 PATCHES = {
     # =========================================================================
-    # Patch 1: qwen3.py - 添加 Attention 初始化和 forward 日志
+    # Patch 1: qwen2.py (Qwen2.5 使用 qwen2.py) - 在初始化时添加日志
+    # 这是安全的，因为 __init__ 不会被 torch.compile 追踪
     # =========================================================================
-    "model_executor/models/qwen3.py": {
+    "model_executor/models/qwen2.py": {
         "backup": True,
-        "insertions": [
-            {
-                "after_line": "from vllm.model_executor.layers.vocab_parallel_embedding import (",
-                "content": """
-# ===== DEBUG LOGGING =====
-import logging
-_debug_logger = logging.getLogger("vllm.study.qwen3")
-_debug_logger.setLevel(logging.DEBUG)
-if not _debug_logger.handlers:
-    _handler = logging.StreamHandler()
-    _handler.setFormatter(logging.Formatter('%(asctime)s | QWEN3 | %(message)s', datefmt='%H:%M:%S'))
-    _debug_logger.addHandler(_handler)
-# ===== END DEBUG LOGGING =====
-"""
-            },
-        ],
+        "insertions": [],
         "replacements": [
             {
-                "original": """    def __init__(
-        self,
-        hidden_size: int,
-        num_heads: int,
-        num_kv_heads: int,
-        rope_parameters: dict,
-        max_position: int = 4096 * 32,
-        head_dim: int | None = None,
-        rms_norm_eps: float = 1e-06,
-        qkv_bias: bool = False,
-        cache_config: CacheConfig | None = None,
-        quant_config: QuantizationConfig | None = None,
-        prefix: str = "",
-        attn_type: str = AttentionType.DECODER,
-        dual_chunk_attention_config: dict[str, Any] | None = None,
-    ) -> None:
-        super().__init__()
-        self.hidden_size = hidden_size""",
-                "replacement": """    def __init__(
-        self,
-        hidden_size: int,
-        num_heads: int,
-        num_kv_heads: int,
-        rope_parameters: dict,
-        max_position: int = 4096 * 32,
-        head_dim: int | None = None,
-        rms_norm_eps: float = 1e-06,
-        qkv_bias: bool = False,
-        cache_config: CacheConfig | None = None,
-        quant_config: QuantizationConfig | None = None,
-        prefix: str = "",
-        attn_type: str = AttentionType.DECODER,
-        dual_chunk_attention_config: dict[str, Any] | None = None,
-    ) -> None:
-        super().__init__()
-        self.hidden_size = hidden_size
-        # ===== DEBUG: Log attention head configuration =====
+                # 在 Qwen2Attention.__init__ 末尾添加日志
+                "original": """        self.attn = Attention(
+            self.num_heads,
+            self.head_dim,
+            self.scaling,
+            num_kv_heads=self.num_kv_heads,
+            cache_config=cache_config,
+            quant_config=quant_config,
+            prefix=f"{prefix}.attn",
+            attn_type=attn_type,
+            dual_chunk_attention_config=dual_chunk_attention_config,
+        )""",
+                "replacement": """        self.attn = Attention(
+            self.num_heads,
+            self.head_dim,
+            self.scaling,
+            num_kv_heads=self.num_kv_heads,
+            cache_config=cache_config,
+            quant_config=quant_config,
+            prefix=f"{prefix}.attn",
+            attn_type=attn_type,
+            dual_chunk_attention_config=dual_chunk_attention_config,
+        )
+        
+        # ===== DEBUG: 打印 Attention 初始化信息 =====
         from vllm.distributed import get_tensor_model_parallel_world_size, get_tensor_model_parallel_rank
         tp_rank = get_tensor_model_parallel_rank()
         tp_size = get_tensor_model_parallel_world_size()
-        _debug_logger.info(
-            f"[TP_RANK={tp_rank}] 🔧 Qwen3Attention.__init__: "
-            f"hidden={hidden_size}, heads={num_heads}(total)->分片后将计算, "
-            f"kv_heads={num_kv_heads}, head_dim={head_dim}, prefix={prefix}"
+        logger.info(
+            f"[TP_RANK={tp_rank}/{tp_size}] Qwen2Attention.__init__: "
+            f"hidden={self.hidden_size}, total_heads={self.total_num_heads}, "
+            f"heads/GPU={self.num_heads}, total_kv_heads={self.total_num_kv_heads}, "
+            f"kv_heads/GPU={self.num_kv_heads}, head_dim={self.head_dim}, "
+            f"q_size={self.q_size}, kv_size={self.kv_size}, prefix={prefix}"
         )
         # ===== END DEBUG ====="""
             }
@@ -102,61 +79,51 @@ if not _debug_logger.handlers:
     },
     
     # =========================================================================
-    # Patch 2: parallel_state.py - 添加 AllReduce 日志
+    # Patch 2: linear.py - 在 QKVParallelLinear 初始化时添加日志
     # =========================================================================
-    "distributed/parallel_state.py": {
+    "model_executor/layers/linear.py": {
         "backup": True,
         "insertions": [],
         "replacements": [
             {
-                "original": """    def all_reduce(self, input_: torch.Tensor) -> torch.Tensor:
-        \"\"\"
-        User-facing all-reduce function before we actually call the
-        all-reduce operation.
+                "original": """        super().__init__(
+            input_size=input_size,
+            output_size=output_size,
+            bias=bias,
+            gather_output=False,
+            skip_bias_add=skip_bias_add,
+            params_dtype=params_dtype,
+            quant_config=quant_config,
+            prefix=prefix,
+            return_bias=return_bias,
+            disable_tp=disable_tp,
+        )
 
-        We need this because Dynamo does not support passing an arbitrary
-        object (`self` in this case) to a custom op. We need to pass the
-         group name as a string, and then look up the group coordinator from
-         the group name, dispatch the all-reduce operation to the group
-         coordinator.
-
-        In addition, PyTorch custom ops do not support mutation or returning
-        a new tensor in the same op. So we always make the all-reduce operation
-        out-of-place.
-        \"\"\"
-        # Bypass the function if we are using only 1 GPU.
-        if self.world_size == 1:
-            return input_""",
-                "replacement": """    _allreduce_counter = 0  # Class-level counter for debugging
-    
-    def all_reduce(self, input_: torch.Tensor) -> torch.Tensor:
-        \"\"\"
-        User-facing all-reduce function before we actually call the
-        all-reduce operation.
-
-        We need this because Dynamo does not support passing an arbitrary
-        object (`self` in this case) to a custom op. We need to pass the
-         group name as a string, and then look up the group coordinator from
-         the group name, dispatch the all-reduce operation to the group
-         coordinator.
-
-        In addition, PyTorch custom ops do not support mutation or returning
-        a new tensor in the same op. So we always make the all-reduce operation
-        out-of-place.
-        \"\"\"
-        # ===== DEBUG: Log AllReduce operations =====
-        GroupCoordinator._allreduce_counter += 1
-        count = GroupCoordinator._allreduce_counter
-        if count <= 10 or count % 200 == 0:
-            logger.debug(
-                f"📡 AllReduce #{count}: shape={input_.shape}, "
-                f"rank={self.rank_in_group}/{self.world_size}, group={self.unique_name}"
-            )
-        # ===== END DEBUG =====
+    def _get_shard_offset_mapping(self, loaded_shard_id: str):""",
+                "replacement": """        super().__init__(
+            input_size=input_size,
+            output_size=output_size,
+            bias=bias,
+            gather_output=False,
+            skip_bias_add=skip_bias_add,
+            params_dtype=params_dtype,
+            quant_config=quant_config,
+            prefix=prefix,
+            return_bias=return_bias,
+            disable_tp=disable_tp,
+        )
         
-        # Bypass the function if we are using only 1 GPU.
-        if self.world_size == 1:
-            return input_"""
+        # ===== DEBUG: 打印 QKV 分片信息 =====
+        logger.info(
+            f"[TP={tp_size}] QKVParallelLinear: prefix={prefix}, "
+            f"hidden={self.hidden_size}, head_size={self.head_size}, "
+            f"total_heads={self.total_num_heads}, heads/GPU={self.num_heads}, "
+            f"total_kv_heads={self.total_num_kv_heads}, kv_heads/GPU={self.num_kv_heads}, "
+            f"output_sizes={self.output_sizes}"
+        )
+        # ===== END DEBUG =====
+
+    def _get_shard_offset_mapping(self, loaded_shard_id: str):"""
             }
         ]
     },
