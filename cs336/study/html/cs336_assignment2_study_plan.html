@@ -1,0 +1,495 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>cs336_assignment2_study_plan</title>
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700;800;900&family=JetBrains+Mono:wght@400;500;600&family=Noto+Sans+SC:wght@300;400;500;700&display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/KaTeX/0.16.9/katex.min.css">
+  <script defer src="https://cdnjs.cloudflare.com/ajax/libs/KaTeX/0.16.9/katex.min.js"></script>
+  <script defer src="https://cdnjs.cloudflare.com/ajax/libs/KaTeX/0.16.9/contrib/auto-render.min.js" onload="renderMathInElement(document.body);"></script>
+  <style>
+    :root {
+      --bg-primary: #0a0e1a;
+      --bg-secondary: #111827;
+      --bg-card: #1a2236;
+      --bg-code: #0d1117;
+      --border-subtle: rgba(255,255,255,0.06);
+      --border-accent: rgba(99,102,241,0.3);
+      --text-primary: #e2e8f0;
+      --text-secondary: #94a3b8;
+      --text-muted: #64748b;
+      --accent-blue: #3b82f6;
+      --accent-purple: #8b5cf6;
+      --radius: 12px;
+      --radius-sm: 8px;
+    }
+    body {
+      font-family: 'Inter', 'Noto Sans SC', sans-serif;
+      background: var(--bg-primary);
+      color: var(--text-primary);
+      line-height: 1.7;
+      font-size: 16px;
+      padding: 40px;
+      max-width: 900px;
+      margin: 0 auto;
+    }
+    h1, h2, h3, h4, h5 { color: var(--text-primary); margin-top: 1.5em; margin-bottom: 0.5em; }
+    h1 { font-size: 2.2em; border-bottom: 2px solid var(--border-subtle); padding-bottom: 0.3em; }
+    h2 { font-size: 1.8em; border-bottom: 1px solid var(--border-subtle); padding-bottom: 0.3em; }
+    h3 { font-size: 1.4em; }
+    p, ul, ol { margin-bottom: 1em; color: var(--text-secondary); }
+    a { color: var(--accent-blue); text-decoration: none; }
+    a:hover { text-decoration: underline; }
+    code {
+      font-family: 'JetBrains Mono', monospace;
+      font-size: 0.9em;
+      background: rgba(139,92,246,0.1);
+      color: var(--accent-purple);
+      padding: 0.2em 0.4em;
+      border-radius: 4px;
+    }
+    pre {
+      background: var(--bg-code);
+      border: 1px solid var(--border-subtle);
+      border-radius: var(--radius-sm);
+      padding: 1em;
+      overflow-x: auto;
+      margin: 1em 0;
+    }
+    pre code {
+      background: transparent;
+      color: #c9d1d9;
+      padding: 0;
+    }
+    blockquote {
+      border-left: 4px solid var(--accent-purple);
+      padding-left: 1em;
+      margin: 1em 0;
+      color: var(--text-muted);
+      background: rgba(139,92,246,0.05);
+      border-radius: 0 var(--radius-sm) var(--radius-sm) 0;
+      padding: 10px 15px;
+    }
+    table {
+      width: 100%;
+      border-collapse: collapse;
+      margin: 1em 0;
+    }
+    th, td {
+      padding: 10px;
+      border: 1px solid var(--border-subtle);
+      text-align: left;
+    }
+    th { background: var(--bg-card); }
+    img { max-width: 100%; border-radius: var(--radius-sm); }
+    hr { border: 0; border-top: 1px solid var(--border-subtle); margin: 2em 0; }
+  </style>
+</head>
+<body>
+<h1 id="cs336-assignment-2-systems-">CS336 Assignment 2: Systems - 学习计划</h1>
+<blockquote>
+<p><strong>目标</strong>: 掌握 LLM 系统级优化技术，并将所学与 vLLM 源码实现对照理解</p>
+</blockquote>
+<hr />
+<h2 id="assignment-2">📋 Assignment 2 任务概览</h2>
+<p>Assignment 2 要求您实现以下核心内容：</p>
+<table>
+<thead>
+<tr>
+<th>模块</th>
+<th>任务描述</th>
+<th>难度</th>
+<th>vLLM 对应实现</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><strong>FlashAttention (PyTorch)</strong></td>
+<td>用纯 PyTorch 实现 FlashAttention forward/backward</td>
+<td>⭐⭐⭐</td>
+<td><code>vllm/attention/backends/</code></td>
+</tr>
+<tr>
+<td><strong>FlashAttention (Triton)</strong></td>
+<td>用 Triton 编写 FlashAttention kernel</td>
+<td>⭐⭐⭐⭐</td>
+<td><code>vllm/attention/ops/</code></td>
+</tr>
+<tr>
+<td><strong>DDP Individual Parameters</strong></td>
+<td>实现逐参数梯度同步的分布式数据并行</td>
+<td>⭐⭐⭐</td>
+<td><code>vllm/distributed/</code></td>
+</tr>
+<tr>
+<td><strong>DDP Bucketed</strong></td>
+<td>实现分桶梯度同步的 DDP (更高效)</td>
+<td>⭐⭐⭐⭐</td>
+<td>PyTorch DDP</td>
+</tr>
+<tr>
+<td><strong>Sharded Optimizer</strong></td>
+<td>实现 ZeRO-style 优化器状态分片</td>
+<td>⭐⭐⭐⭐</td>
+<td>DeepSpeed/FSDP</td>
+</tr>
+</tbody>
+</table>
+<hr />
+<h2 id="_1">🎯 学习路径</h2>
+<h3 id="phase-1-1">Phase 1: 理解基础模型代码 (1小时)</h3>
+<p><strong>目标</strong>: 熟悉 <code>cs336_basics</code> 中的参考实现</p>
+<p><strong>文件位置</strong>: <code>cs336\assignment2-systems\cs336-basics\cs336_basics\model.py</code></p>
+<p><strong>核心组件</strong>:</p>
+<pre><code>BasicsTransformerLM
+├── Embedding (词嵌入)
+├── RotaryEmbedding (RoPE 位置编码)
+├── TransformerBlock × num_layers
+│   ├── RMSNorm
+│   ├── CausalMultiHeadSelfAttention
+│   │   ├── q_proj, k_proj, v_proj
+│   │   ├── scaled_dot_product_attention  ← 需要优化的地方!
+│   │   └── output_proj
+│   └── SwiGLU (FFN)
+└── lm_head
+</code></pre>
+<p><strong>✅ 练习</strong>: 
+1. 阅读 <code>scaled_dot_product_attention</code> 函数 (lines 400-432)
+2. 理解朴素实现的内存复杂度: O(N²) 用于注意力矩阵</p>
+<hr />
+<h3 id="phase-2-flashattention-2">Phase 2: FlashAttention 理论 (2小时)</h3>
+<p><strong>核心论文</strong>: <a href="https://arxiv.org/abs/2205.14135">FlashAttention: Fast and Memory-Efficient Exact Attention</a></p>
+<p><strong>关键概念</strong>:</p>
+<h4 id="21-flashattention">2.1 为什么需要 FlashAttention?</h4>
+<pre><code>标准 Attention 问题:
+┌─────────────────────────────────────────┐
+│  Q @ K^T  →  需要具化 N×N 注意力矩阵     │
+│  内存: O(N²)                            │
+│  IO 复杂度: O(N² d)                     │
+└─────────────────────────────────────────┘
+
+FlashAttention 解决方案:
+┌─────────────────────────────────────────┐
+│  分块计算 (Tiling)                       │
+│  利用 Online Softmax 算法               │
+│  内存: O(N) — 不需要存储完整注意力矩阵   │
+│  IO 复杂度: O(N² d² / M) 其中 M 是 SRAM │
+└─────────────────────────────────────────┘
+</code></pre>
+<h4 id="22-online-softmax">2.2 Online Softmax 算法</h4>
+<p>这是 FlashAttention 的核心！</p>
+<pre><code class="language-python"># 传统 Softmax 需要两遍:
+# 1. 计算 max(x) 用于数值稳定
+# 2. 计算 exp(x - max) 和 sum
+
+# Online Softmax 可以一遍完成:
+def online_softmax_step(m_prev, l_prev, x_block):
+    m_new = max(m_prev, max(x_block))    # 更新最大值
+    l_new = l_prev * exp(m_prev - m_new) + sum(exp(x_block - m_new))  # 更新归一化因子
+    return m_new, l_new
+</code></pre>
+<h4 id="23-flashattention">2.3 FlashAttention 伪代码</h4>
+<pre><code class="language-python"># Forward Pass (简化版)
+def flash_attention_forward(Q, K, V, block_size):
+    N = Q.shape[0]
+    O = zeros(N, d)
+    L = zeros(N)      # logsumexp
+    M = full(N, -inf) # running max
+
+    for i in range(0, N, block_size):
+        Qi = Q[i:i+block_size]
+        for j in range(0, N, block_size):
+            Kj, Vj = K[j:j+block_size], V[j:j+block_size]
+
+            # 在 SRAM 中计算注意力分数
+            S_ij = Qi @ Kj.T / sqrt(d)
+
+            # Online softmax 更新
+            m_new = max(M[i:i+block_size], rowmax(S_ij))
+            P_ij = exp(S_ij - m_new)
+            l_new = exp(M[i:i+block_size] - m_new) * L[i:i+block_size] + rowsum(P_ij)
+
+            # 增量更新输出
+            O[i:i+block_size] = (exp(M - m_new) * O[i:i+block_size] + P_ij @ Vj) / l_new
+
+            M[i:i+block_size] = m_new
+            L[i:i+block_size] = l_new
+
+    return O, L  # L 是 log(l)
+</code></pre>
+<p><strong>📚 推荐资源</strong>:
+- <a href="https://www.youtube.com/watch?v=gMOAud7hZg4">FlashAttention 论文精读</a>
+- <a href="https://triton-lang.org/main/getting-started/tutorials/06-fused-attention.html">Triton FlashAttention Tutorial</a></p>
+<hr />
+<h3 id="phase-3-flashattention-3-4">Phase 3: 实现 FlashAttention (3-4小时)</h3>
+<p><strong>任务 1</strong>: PyTorch 版本 (纯 Python + PyTorch ops)</p>
+<p>创建文件: <code>cs336\assignment2-systems\cs336_systems\flash_attention.py</code></p>
+<pre><code class="language-python">import torch
+import torch.autograd as autograd
+from einops import einsum
+
+class FlashAttentionPyTorch(autograd.Function):
+    @staticmethod
+    def forward(ctx, Q, K, V, is_causal=False):
+        &quot;&quot;&quot;
+        Args:
+            Q: (batch, n_queries, d)
+            K: (batch, n_keys, d)
+            V: (batch, n_keys, d)
+            is_causal: 是否使用因果掩码
+        Returns:
+            O: (batch, n_queries, d)
+        &quot;&quot;&quot;
+        # TODO: 实现分块 attention
+        # 1. 设置 block_size (e.g., 64)
+        # 2. 初始化 O, L (logsumexp), M (running max)
+        # 3. 双重循环遍历 Q 和 KV 的块
+        # 4. 使用 online softmax 更新 O
+
+        # 保存用于 backward
+        ctx.save_for_backward(Q, K, V, O, L)
+        ctx.is_causal = is_causal
+        return O
+
+    @staticmethod
+    def backward(ctx, dO):
+        &quot;&quot;&quot;
+        计算 dQ, dK, dV
+
+        关键技巧: 重计算注意力分数而不是存储它们!
+        &quot;&quot;&quot;
+        Q, K, V, O, L = ctx.saved_tensors
+        # TODO: 实现 backward
+        # 参考论文 Algorithm 2
+        return dQ, dK, dV, None
+</code></pre>
+<p><strong>任务 2</strong>: Triton 版本 (需要 GPU)</p>
+<pre><code class="language-python">import triton
+import triton.language as tl
+
+@triton.jit
+def flash_attention_kernel(
+    Q, K, V, O, L,  # 指针
+    stride_qb, stride_qh, stride_qs, stride_qd,
+    # ... 更多 strides
+    N_QUERIES, N_KEYS, D,
+    BLOCK_M: tl.constexpr, BLOCK_N: tl.constexpr, BLOCK_D: tl.constexpr,
+):
+    # TODO: 实现 Triton kernel
+    pass
+</code></pre>
+<hr />
+<h3 id="phase-4-ddp-3-4">Phase 4: 分布式数据并行 DDP (3-4小时)</h3>
+<p><strong>任务</strong>: 实现自己的 DDP wrapper</p>
+<h4 id="41-ddp">4.1 DDP 基础原理</h4>
+<pre><code>┌─────────────────────────────────────────────────────────┐
+│                    DDP 训练流程                          │
+├─────────────────────────────────────────────────────────┤
+│  1. 初始化: Rank 0 广播参数到所有 ranks                  │
+│  2. Forward: 每个 rank 独立计算 (不同数据)               │
+│  3. Backward: 计算本地梯度                               │
+│  4. AllReduce: 同步梯度 (平均)                           │
+│  5. Update: 每个 rank 独立更新参数 (结果相同)            │
+└─────────────────────────────────────────────────────────┘
+</code></pre>
+<h4 id="42-individual-parameters-ddp">4.2 Individual Parameters DDP</h4>
+<pre><code class="language-python">class DDPIndividualParameters(nn.Module):
+    &quot;&quot;&quot;
+    最简单的 DDP: 每个参数单独做 AllReduce
+
+    缺点: 启动开销大 (每个参数一次 AllReduce)
+    &quot;&quot;&quot;
+    def __init__(self, module):
+        super().__init__()
+        self.module = module
+
+        # 1. 广播参数从 Rank 0
+        for param in self.module.parameters():
+            dist.broadcast(param.data, src=0)
+
+        # 2. 注册 hook: backward 时自动同步梯度
+        for param in self.module.parameters():
+            if param.requires_grad:
+                param.register_hook(self._make_allreduce_hook(param))
+
+    def _make_allreduce_hook(self, param):
+        def hook(grad):
+            handle = dist.all_reduce(grad, op=dist.ReduceOp.AVG, async_op=True)
+            self._handles.append((param, handle))
+        return hook
+
+    def finish_gradient_synchronization(self):
+        &quot;&quot;&quot;等待所有 AllReduce 完成&quot;&quot;&quot;
+        for param, handle in self._handles:
+            handle.wait()
+        self._handles.clear()
+</code></pre>
+<h4 id="43-bucketed-ddp">4.3 Bucketed DDP (更高效)</h4>
+<pre><code class="language-python">class DDPBucketed(nn.Module):
+    &quot;&quot;&quot;
+    分桶 DDP: 将参数分组到桶中，桶满了才做 AllReduce
+
+    优点: 减少通信启动开销，可以与计算重叠
+    &quot;&quot;&quot;
+    def __init__(self, module, bucket_size_mb=25.0):
+        super().__init__()
+        self.module = module
+        self.bucket_size_bytes = int(bucket_size_mb * 1024 * 1024)
+
+        # 1. 按 backward 顺序构建桶
+        self._build_buckets()
+
+        # 2. 广播参数
+        for param in self.module.parameters():
+            dist.broadcast(param.data, src=0)
+
+        # 3. 注册 hooks
+        self._register_hooks()
+</code></pre>
+<hr />
+<h3 id="phase-5-sharded-optimizer-zero-2-3">Phase 5: Sharded Optimizer (ZeRO) (2-3小时)</h3>
+<p><strong>概念</strong>: 将优化器状态分片到多个 ranks，减少内存</p>
+<pre><code>┌────────────────────────────────────────────────────────────┐
+│                    ZeRO Stage 1                            │
+├────────────────────────────────────────────────────────────┤
+│  传统: 每个 rank 存储完整优化器状态 (2x 参数大小 for Adam)  │
+│  ZeRO-1: 每个 rank 只存储 1/N 的优化器状态                 │
+│         AllGather 在 optimizer.step() 之后收集更新的参数   │
+└────────────────────────────────────────────────────────────┘
+</code></pre>
+<hr />
+<h2 id="vllm">🔗 与 vLLM 的连接</h2>
+<h3 id="flashattention-vllm-attention-backends">FlashAttention → vLLM Attention Backends</h3>
+<pre><code>cs336 实现                          vLLM 实现
+─────────────────────────────────────────────────────────
+FlashAttentionPyTorch        →     vllm/attention/backends/abstract.py
+FlashAttentionTriton         →     vllm/attention/backends/flash_attn.py
+                             →     vllm/attention/ops/triton_decode_attention.py
+</code></pre>
+<p><strong>关键代码路径</strong>:</p>
+<pre><code class="language-python"># vLLM 中的 attention 调用链
+vllm/model_executor/models/qwen3.py
+  └── Qwen3Attention.forward()
+        └── self.attn.forward()  # AttentionImpl
+              └── FlashAttentionBackend.forward()
+                    └── flash_attn_varlen_func()  # FlashAttention 库调用
+</code></pre>
+<h3 id="ddp-vllm">DDP → vLLM 分布式推理</h3>
+<p>vLLM 主要使用 <strong>Tensor Parallelism</strong> 而不是 DDP，但理解 DDP 有助于理解分布式通信原语。</p>
+<pre><code>cs336 DDP 概念                      vLLM 分布式
+─────────────────────────────────────────────────────────
+AllReduce                    →     vllm/distributed/parallel_state.py
+参数广播                      →     tensor_model_parallel_all_reduce()
+梯度同步                      →     (推理不需要，但理解有帮助)
+</code></pre>
+<hr />
+<h2 id="_2">📅 学习时间安排</h2>
+<table>
+<thead>
+<tr>
+<th>阶段</th>
+<th>预计时间</th>
+<th>产出</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>Phase 1: 基础代码阅读</td>
+<td>1小时</td>
+<td>理解参考实现</td>
+</tr>
+<tr>
+<td>Phase 2: FlashAttention 理论</td>
+<td>2小时</td>
+<td>笔记、算法理解</td>
+</tr>
+<tr>
+<td>Phase 3: FlashAttention 实现</td>
+<td>4小时</td>
+<td>通过 test_attention.py</td>
+</tr>
+<tr>
+<td>Phase 4: DDP 实现</td>
+<td>4小时</td>
+<td>通过 test_ddp.py</td>
+</tr>
+<tr>
+<td>Phase 5: Sharded Optimizer</td>
+<td>3小时</td>
+<td>通过 test_sharded_optimizer.py</td>
+</tr>
+<tr>
+<td><strong>对照 vLLM 源码</strong></td>
+<td>2小时</td>
+<td>深入理解</td>
+</tr>
+</tbody>
+</table>
+<p><strong>总计</strong>: ~16小时</p>
+<hr />
+<h2 id="_3">🧪 测试命令</h2>
+<pre><code class="language-bash">cd D:\projects\vllm\cs336\assignment2-systems
+
+# 安装依赖
+pip install uv
+uv sync
+
+# 运行所有测试 (开始时都会失败)
+uv run pytest tests/
+
+# 单独测试各模块
+uv run pytest tests/test_attention.py -v           # FlashAttention
+uv run pytest tests/test_ddp_individual_parameters.py -v  # DDP Individual
+uv run pytest tests/test_ddp.py -v                 # DDP Bucketed
+uv run pytest tests/test_sharded_optimizer.py -v   # Sharded Optimizer
+</code></pre>
+<hr />
+<h2 id="_4">📚 配套讲座</h2>
+<p>按顺序学习这些讲座:</p>
+<ol>
+<li><strong>Lecture 5 - GPUs</strong> (<code>nonexecutable/2025 Lecture 5 - GPUs.pdf</code>)</li>
+<li>
+<p>GPU 架构、内存层级、SRAM vs HBM</p>
+</li>
+<li>
+<p><strong>Lecture 6 - Optimization</strong> (<code>spring2025-lectures/lecture_06.py</code>)</p>
+</li>
+<li>
+<p>内存优化、计算优化技术</p>
+</li>
+<li>
+<p><strong>Lecture 7 - Parallelism</strong> (<code>nonexecutable/2025 Lecture 7 - Parallelism basics.pdf</code>)</p>
+</li>
+<li>
+<p>数据并行、模型并行、流水线并行</p>
+</li>
+<li>
+<p><strong>Lecture 8 - Distributed Training</strong> (<code>spring2025-lectures/lecture_08.py</code>)</p>
+</li>
+<li>分布式训练实战</li>
+</ol>
+<hr />
+<h2 id="_5">✅ 下一步行动</h2>
+<ol>
+<li>[ ] 阅读 <code>cs336_basics/model.py</code> 中的 <code>scaled_dot_product_attention</code></li>
+<li>[ ] 阅读 FlashAttention 论文 (至少 Algorithm 1 &amp; 2)</li>
+<li>[ ] 创建 <code>cs336_systems/flash_attention.py</code> 开始实现</li>
+<li>[ ] 运行 <code>uv run pytest tests/test_attention.py -v</code> 验证实现</li>
+</ol>
+<p>祝学习顺利！ 🚀</p>
+<script>
+  document.addEventListener("DOMContentLoaded", function() {
+    if (typeof renderMathInElement !== 'undefined') {
+      renderMathInElement(document.body, {
+        delimiters: [
+          {left: "$$", right: "$$", display: true},
+          {left: "$", right: "$", display: false}
+        ],
+        throwOnError: false
+      });
+    }
+  });
+</script>
+</body>
+</html>

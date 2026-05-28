@@ -1,0 +1,544 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>cs336_assignment5_study_plan</title>
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700;800;900&family=JetBrains+Mono:wght@400;500;600&family=Noto+Sans+SC:wght@300;400;500;700&display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/KaTeX/0.16.9/katex.min.css">
+  <script defer src="https://cdnjs.cloudflare.com/ajax/libs/KaTeX/0.16.9/katex.min.js"></script>
+  <script defer src="https://cdnjs.cloudflare.com/ajax/libs/KaTeX/0.16.9/contrib/auto-render.min.js" onload="renderMathInElement(document.body);"></script>
+  <style>
+    :root {
+      --bg-primary: #0a0e1a;
+      --bg-secondary: #111827;
+      --bg-card: #1a2236;
+      --bg-code: #0d1117;
+      --border-subtle: rgba(255,255,255,0.06);
+      --border-accent: rgba(99,102,241,0.3);
+      --text-primary: #e2e8f0;
+      --text-secondary: #94a3b8;
+      --text-muted: #64748b;
+      --accent-blue: #3b82f6;
+      --accent-purple: #8b5cf6;
+      --radius: 12px;
+      --radius-sm: 8px;
+    }
+    body {
+      font-family: 'Inter', 'Noto Sans SC', sans-serif;
+      background: var(--bg-primary);
+      color: var(--text-primary);
+      line-height: 1.7;
+      font-size: 16px;
+      padding: 40px;
+      max-width: 900px;
+      margin: 0 auto;
+    }
+    h1, h2, h3, h4, h5 { color: var(--text-primary); margin-top: 1.5em; margin-bottom: 0.5em; }
+    h1 { font-size: 2.2em; border-bottom: 2px solid var(--border-subtle); padding-bottom: 0.3em; }
+    h2 { font-size: 1.8em; border-bottom: 1px solid var(--border-subtle); padding-bottom: 0.3em; }
+    h3 { font-size: 1.4em; }
+    p, ul, ol { margin-bottom: 1em; color: var(--text-secondary); }
+    a { color: var(--accent-blue); text-decoration: none; }
+    a:hover { text-decoration: underline; }
+    code {
+      font-family: 'JetBrains Mono', monospace;
+      font-size: 0.9em;
+      background: rgba(139,92,246,0.1);
+      color: var(--accent-purple);
+      padding: 0.2em 0.4em;
+      border-radius: 4px;
+    }
+    pre {
+      background: var(--bg-code);
+      border: 1px solid var(--border-subtle);
+      border-radius: var(--radius-sm);
+      padding: 1em;
+      overflow-x: auto;
+      margin: 1em 0;
+    }
+    pre code {
+      background: transparent;
+      color: #c9d1d9;
+      padding: 0;
+    }
+    blockquote {
+      border-left: 4px solid var(--accent-purple);
+      padding-left: 1em;
+      margin: 1em 0;
+      color: var(--text-muted);
+      background: rgba(139,92,246,0.05);
+      border-radius: 0 var(--radius-sm) var(--radius-sm) 0;
+      padding: 10px 15px;
+    }
+    table {
+      width: 100%;
+      border-collapse: collapse;
+      margin: 1em 0;
+    }
+    th, td {
+      padding: 10px;
+      border: 1px solid var(--border-subtle);
+      text-align: left;
+    }
+    th { background: var(--bg-card); }
+    img { max-width: 100%; border-radius: var(--radius-sm); }
+    hr { border: 0; border-top: 1px solid var(--border-subtle); margin: 2em 0; }
+  </style>
+</head>
+<body>
+<h1 id="cs336-assignment-5-alignment-">CS336 Assignment 5: Alignment - 学习计划</h1>
+<blockquote>
+<p><strong>目标</strong>: 理解 LLM 对齐技术 —— 如何让模型按照人类意图生成有用且安全的回复</p>
+</blockquote>
+<hr />
+<h2 id="assignment-5">📋 Assignment 5 任务概览</h2>
+<table>
+<thead>
+<tr>
+<th>模块</th>
+<th>任务描述</th>
+<th>难度</th>
+<th>代码接口</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><strong>Tokenize Prompt/Output</strong></td>
+<td>分词 + response mask 构建</td>
+<td>⭐⭐</td>
+<td><code>run_tokenize_prompt_and_output()</code></td>
+</tr>
+<tr>
+<td><strong>Masked Mean</strong></td>
+<td>带 mask 的均值计算</td>
+<td>⭐</td>
+<td><code>run_masked_mean()</code></td>
+</tr>
+<tr>
+<td><strong>Masked Normalize</strong></td>
+<td>带 mask 的归一化</td>
+<td>⭐</td>
+<td><code>run_masked_normalize()</code></td>
+</tr>
+<tr>
+<td><strong>Response Log-Probs</strong></td>
+<td>计算 response 的对数概率</td>
+<td>⭐⭐</td>
+<td><code>run_get_response_log_probs()</code></td>
+</tr>
+<tr>
+<td><strong>Entropy</strong></td>
+<td>计算 logits 的熵</td>
+<td>⭐</td>
+<td><code>run_compute_entropy()</code></td>
+</tr>
+<tr>
+<td><strong>SFT Loss</strong></td>
+<td>监督微调损失 + 梯度累积</td>
+<td>⭐⭐</td>
+<td><code>run_sft_microbatch_train_step()</code></td>
+</tr>
+<tr>
+<td><strong>Naive Policy Gradient</strong></td>
+<td>基础策略梯度损失</td>
+<td>⭐⭐</td>
+<td><code>run_compute_naive_policy_gradient_loss()</code></td>
+</tr>
+<tr>
+<td><strong>GRPO Group Rewards</strong></td>
+<td>GRPO 组归一化奖励</td>
+<td>⭐⭐⭐</td>
+<td><code>run_compute_group_normalized_rewards()</code></td>
+</tr>
+<tr>
+<td><strong>GRPO-Clip Loss</strong></td>
+<td>PPO 风格的裁剪损失</td>
+<td>⭐⭐⭐</td>
+<td><code>run_compute_grpo_clip_loss()</code></td>
+</tr>
+<tr>
+<td><strong>GRPO Train Step</strong></td>
+<td>GRPO 完整训练步</td>
+<td>⭐⭐⭐</td>
+<td><code>run_grpo_microbatch_train_step()</code></td>
+</tr>
+<tr>
+<td><strong>DPO Loss</strong></td>
+<td>Direct Preference Optimization</td>
+<td>⭐⭐⭐</td>
+<td><code>run_compute_per_instance_dpo_loss()</code></td>
+</tr>
+<tr>
+<td><strong>Packed SFT Dataset</strong></td>
+<td>打包式 SFT 数据集</td>
+<td>⭐⭐</td>
+<td><code>get_packed_sft_dataset()</code></td>
+</tr>
+<tr>
+<td><strong>MMLU/GSM8K 解析</strong></td>
+<td>评估结果解析</td>
+<td>⭐⭐</td>
+<td><code>run_parse_mmlu/gsm8k_response()</code></td>
+</tr>
+</tbody>
+</table>
+<hr />
+<h2 id="_1">🎯 核心知识点</h2>
+<h3 id="1-alignment">1. 对齐 (Alignment) 全景</h3>
+<pre><code>预训练模型 (Base LLM)
+    │
+    ├── SFT (Supervised Fine-Tuning): 模仿高质量回复
+    │     Input: (prompt, good_response) pairs
+    │     Loss: -log P(response | prompt) — 标准 cross-entropy
+    │
+    ├── RLHF (RL from Human Feedback): 强化学习优化
+    │     │
+    │     ├── PPO: Proximal Policy Optimization
+    │     │     需要: reward model + reference policy
+    │     │     Loss: clip(π/π_old, 1±ε) × advantage
+    │     │
+    │     └── GRPO: Group Relative Policy Optimization  ⭐ (DeepSeek)
+    │           不需要 reward model!
+    │           为每个 prompt 生成 G 个回复
+    │           用组内相对奖励作为 advantage
+    │
+    └── DPO (Direct Preference Optimization): 直接偏好优化
+          Input: (prompt, chosen, rejected) triplets
+          Loss: -log σ(β × (log π(chosen)/π_ref(chosen) - log π(rejected)/π_ref(rejected)))
+</code></pre>
+<hr />
+<h3 id="2-sft-supervised-fine-tuning">2. SFT (Supervised Fine-Tuning)</h3>
+<pre><code class="language-python"># SFT 的核心: 只对 response 部分计算损失
+# 
+# Input:  [&lt;prompt tokens&gt; | &lt;response tokens&gt;]
+# Mask:   [0  0  0  0  0   | 1  1  1  1  1   ]
+#          ↑ 不计算损失       ↑ 计算损失
+
+# 标准 SFT 损失:
+def sft_loss(logits, labels, response_mask):
+    # 计算每个 token 的 cross-entropy
+    token_loss = F.cross_entropy(logits, labels, reduction='none')
+    # 只对 response token 取平均
+    loss = (token_loss * response_mask).sum() / response_mask.sum()
+    return loss
+</code></pre>
+<p><strong>Tokenize + Mask 构建</strong>:</p>
+<pre><code class="language-python"># 输入: prompt_strs = [&quot;What is AI?&quot;], output_strs = [&quot;AI is...&quot;]
+# 输出:
+#   input_ids:     [prompt_token_ids + response_token_ids][:-1]  (去掉最后一个)
+#   labels:        [prompt_token_ids + response_token_ids][1:]   (去掉第一个，shifted)
+#   response_mask: [0, 0, ..., 0, 1, 1, ..., 1]  (response 位置为 1)
+</code></pre>
+<p><strong>梯度累积 (Gradient Accumulation)</strong>:</p>
+<pre><code class="language-python"># 当 GPU 显存不够时，将大 batch 拆成小 microbatch
+# 每个 microbatch 计算 loss 并调用 backward，但不 step
+# 累积 N 次后才 optimizer.step()
+
+for microbatch in split(batch, gradient_accumulation_steps):
+    loss = compute_loss(microbatch) / gradient_accumulation_steps
+    loss.backward()  # 梯度累积
+optimizer.step()     # 一次更新
+optimizer.zero_grad()
+</code></pre>
+<hr />
+<h3 id="3-grpo-group-relative-policy-optimization">3. GRPO (Group Relative Policy Optimization) ⭐</h3>
+<p><strong>DeepSeek-R1 的核心训练算法</strong>:</p>
+<pre><code>GRPO 流程:
+┌─────────────────────────────────────────────────────────┐
+│ 对每个 prompt:                                          │
+│   1. 用当前策略生成 G 个回复 (group_size)                │
+│   2. 用 reward_fn 给每个回复打分                        │
+│   3. 组内归一化: advantage = (r - mean(r)) / std(r)     │
+│   4. 计算策略梯度损失 (支持三种变体):                    │
+│      a. no_baseline:           -r × log π(response)     │
+│      b. reinforce_with_baseline: -advantage × log π     │
+│      c. grpo_clip:             clip ratio × advantage   │
+└─────────────────────────────────────────────────────────┘
+</code></pre>
+<pre><code class="language-python"># 组归一化奖励
+def compute_group_normalized_rewards(rewards, group_size, eps=1e-8):
+    # rewards: [g1_r1, g1_r2, ..., g1_rG, g2_r1, g2_r2, ..., g2_rG, ...]
+    rewards = rewards.reshape(-1, group_size)  # (num_prompts, group_size)
+    mean = rewards.mean(dim=1, keepdim=True)
+    std = rewards.std(dim=1, keepdim=True)
+    advantages = (rewards - mean) / (std + eps)
+    return advantages.flatten()
+
+# GRPO-Clip Loss (类似 PPO)
+def grpo_clip_loss(advantages, log_probs, old_log_probs, cliprange):
+    ratio = torch.exp(log_probs - old_log_probs)  # π/π_old
+    clipped_ratio = torch.clamp(ratio, 1-cliprange, 1+cliprange)
+    loss = -torch.min(ratio * advantages, clipped_ratio * advantages)
+    return loss
+</code></pre>
+<p><strong>Dr. GRPO 变体</strong> (用于本 assignment):
+- 不用 token 级平均，而是 sequence 级求和后除以常数
+- <code>run_masked_normalize</code> 实现了这个归一化</p>
+<hr />
+<h3 id="4-dpo-direct-preference-optimization">4. DPO (Direct Preference Optimization)</h3>
+<pre><code class="language-python"># DPO 直接用偏好数据优化策略，不需要训练 reward model
+
+# DPO 损失:
+def dpo_loss(policy, ref_model, prompt, chosen, rejected, beta):
+    # 计算 policy 和 reference model 的 log-probs
+    pi_chosen = log_prob(policy, prompt + chosen)
+    pi_rejected = log_prob(policy, prompt + rejected)
+    ref_chosen = log_prob(ref_model, prompt + chosen)
+    ref_rejected = log_prob(ref_model, prompt + rejected)
+
+    # DPO 目标: 让 chosen 的 &quot;优势&quot; 大于 rejected
+    log_ratio_chosen = pi_chosen - ref_chosen
+    log_ratio_rejected = pi_rejected - ref_rejected
+
+    loss = -F.logsigmoid(beta * (log_ratio_chosen - log_ratio_rejected))
+    return loss
+</code></pre>
+<hr />
+<h3 id="5-mmlu-gsm8k">5. 评估 (MMLU, GSM8K)</h3>
+<pre><code class="language-python"># MMLU: 多选题评估
+# 解析模型输出中的选项字母 (A/B/C/D)
+def parse_mmlu_response(example, model_output):
+    # 找到 model_output 中的选项字母
+    # 可以用正则匹配: &quot;The answer is (A|B|C|D)&quot;
+    match = re.search(r'[ABCD]', model_output)
+    return match.group() if match else None
+
+# GSM8K: 数学题评估
+# 提取最后出现的数字作为答案
+def parse_gsm8k_response(model_output):
+    numbers = re.findall(r'-?\d+(?:,\d{3})*(?:\.\d+)?', model_output)
+    return numbers[-1] if numbers else None
+</code></pre>
+<hr />
+<h2 id="_2">🎯 学习路径</h2>
+<h3 id="phase-1-sft-3">Phase 1: SFT 基础 (3小时)</h3>
+<p><strong>任务</strong>: 实现 tokenization、masked loss、梯度累积</p>
+<ol>
+<li><code>run_tokenize_prompt_and_output()</code> — prompt/response 分词 + mask</li>
+<li><code>run_masked_mean()</code> — 带 mask 的均值</li>
+<li><code>run_masked_normalize()</code> — Dr. GRPO 归一化</li>
+<li><code>run_get_response_log_probs()</code> — 计算 log-probs</li>
+<li><code>run_compute_entropy()</code> — logits 的熵</li>
+<li><code>run_sft_microbatch_train_step()</code> — SFT 训练步</li>
+</ol>
+<p><strong>💡 关键概念</strong>:
+- 为什么只在 response 上计算损失？→ prompt 是给定的，不需要生成
+- 为什么需要梯度累积？→ 大 batch 尺寸 + 有限 GPU 显存</p>
+<hr />
+<h3 id="phase-2-grpo-4">Phase 2: GRPO 策略梯度 (4小时)</h3>
+<p><strong>任务</strong>: 实现 GRPO 的奖励计算和策略梯度</p>
+<ol>
+<li><code>run_compute_group_normalized_rewards()</code> — 组归一化</li>
+<li><code>run_compute_naive_policy_gradient_loss()</code> — 基础策略梯度</li>
+<li><code>run_compute_grpo_clip_loss()</code> — PPO-style 裁剪</li>
+<li><code>run_compute_policy_gradient_loss()</code> — 统一接口</li>
+<li><code>run_grpo_microbatch_train_step()</code> — GRPO 训练步</li>
+</ol>
+<p><strong>💡 关键概念</strong>:
+- <strong>为什么需要 baseline？</strong> 减小方差，加速收敛
+- <strong>为什么需要 clip？</strong> 防止策略更新过大 (Trustregion)
+- <strong>GRPO vs PPO</strong>: GRPO 不需要 critic/reward model</p>
+<hr />
+<h3 id="phase-3-dpo-3">Phase 3: DPO + 评估 (3小时)</h3>
+<p><strong>任务</strong>: Direct Preference Optimization + 模型评估</p>
+<ol>
+<li><code>run_compute_per_instance_dpo_loss()</code> — DPO 损失</li>
+<li><code>get_packed_sft_dataset()</code> — 打包数据集</li>
+<li><code>run_iterate_batches()</code> — batch 迭代器</li>
+<li><code>run_parse_mmlu_response()</code> — MMLU 解析</li>
+<li><code>run_parse_gsm8k_response()</code> — GSM8K 解析</li>
+</ol>
+<p><strong>💡 关键概念</strong>:
+- <strong>DPO vs RLHF</strong>: DPO 更简单 (不需要 reward model)，但表达能力可能较弱
+- <strong>Packed Dataset</strong>: 将多个短序列打包到固定长度以提高效率</p>
+<hr />
+<h2 id="vllm">🔗 与 vLLM 的连接 ⭐ (高度相关)</h2>
+<p>Assignment 5 与 vLLM <strong>高度相关</strong>:</p>
+<table>
+<thead>
+<tr>
+<th>对齐概念</th>
+<th>vLLM 直接关联</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><strong>SFT 推理</strong></td>
+<td>vLLM 服务的 SFT 模型 — 理解模型为什么能按指令回答</td>
+</tr>
+<tr>
+<td><strong>GRPO Rollout 生成</strong></td>
+<td>🔥 需要高效推理服务！vLLM 正是为此设计</td>
+</tr>
+<tr>
+<td><strong>DPO</strong></td>
+<td>vLLM 服务对齐后的模型</td>
+</tr>
+<tr>
+<td><strong>MMLU/GSM8K 评估</strong></td>
+<td>vLLM 作为推理后端加速评估</td>
+</tr>
+<tr>
+<td><strong>梯度累积</strong></td>
+<td>理解训练 vs 推理的内存权衡</td>
+</tr>
+</tbody>
+</table>
+<p><strong>GRPO 与 vLLM 的深层联系</strong>:</p>
+<pre><code>GRPO 训练循环:
+┌──────────────────────────────────────────────────┐
+│ 1. Rollout Phase (用 vLLM 加速!)                 │
+│    - 用当前策略为每个 prompt 生成 G 个回复         │
+│    - 这正是 vLLM 的 batch inference! 🚀           │
+│                                                  │
+│ 2. Scoring Phase                                 │
+│    - 用 reward function 给回复打分                │
+│                                                  │
+│ 3. Training Phase                                │
+│    - 计算策略梯度损失并更新模型                    │
+│    - 需要用 reference policy 的 log-probs          │
+│    - vLLM 也可以加速 reference model 推理! 🚀      │
+└──────────────────────────────────────────────────┘
+
+实际系统 (如 OpenRLHF, verl): 
+  - 用 vLLM 做 rollout generation
+  - 用 DeepSpeed/FSDP 做 training
+  - 两者交替执行
+</code></pre>
+<hr />
+<h2 id="_3">📚 配套讲座</h2>
+<ol>
+<li><strong>Lecture 15</strong> — SFT 基础: instruction tuning, data formatting</li>
+<li><strong>Lecture 16</strong> — RLHF: reward models, PPO</li>
+<li><strong>Lecture 17</strong> — DPO, GRPO, modern alignment methods</li>
+<li><strong>Lecture 18</strong> — Safety and evaluation</li>
+</ol>
+<hr />
+<h2 id="_4">📚 必读论文</h2>
+<table>
+<thead>
+<tr>
+<th>论文</th>
+<th>重要性</th>
+<th>核心贡献</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><a href="https://arxiv.org/abs/2203.02155">InstructGPT (Ouyang et al., 2022)</a></td>
+<td>⭐⭐⭐</td>
+<td>RLHF 经典流程</td>
+</tr>
+<tr>
+<td><a href="https://arxiv.org/abs/2305.18290">DPO (Rafailov et al., 2023)</a></td>
+<td>⭐⭐⭐</td>
+<td>无需 reward model 的对齐</td>
+</tr>
+<tr>
+<td><a href="https://arxiv.org/abs/2501.12948">DeepSeek-R1 (2025)</a></td>
+<td>⭐⭐⭐</td>
+<td>GRPO 算法</td>
+</tr>
+<tr>
+<td><a href="https://arxiv.org/abs/2402.03300">DeepSeekMath (2024)</a></td>
+<td>⭐⭐⭐</td>
+<td>GRPO 原始论文</td>
+</tr>
+<tr>
+<td><a href="https://arxiv.org/abs/2503.20783">Dr. GRPO (2025)</a></td>
+<td>⭐⭐</td>
+<td>GRPO 改进</td>
+</tr>
+</tbody>
+</table>
+<hr />
+<h2 id="_5">🧪 测试命令</h2>
+<pre><code class="language-bash">cd D:\projects\vllm\cs336\assignment5-alignment
+
+# 安装依赖
+uv sync
+
+# 运行所有测试
+uv run pytest tests/ -v
+
+# 单独测试各模块
+uv run pytest tests/test_data.py -v     # 数据处理
+uv run pytest tests/test_sft.py -v      # SFT
+uv run pytest tests/test_grpo.py -v     # GRPO
+uv run pytest tests/test_dpo.py -v      # DPO
+uv run pytest tests/test_metrics.py -v  # 评估
+</code></pre>
+<hr />
+<h2 id="_6">📅 学习时间安排</h2>
+<table>
+<thead>
+<tr>
+<th>阶段</th>
+<th>预计时间</th>
+<th>产出</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>Phase 1: SFT 基础</td>
+<td>3小时</td>
+<td>tokenization, SFT loss, gradient accumulation</td>
+</tr>
+<tr>
+<td>Phase 2: GRPO 策略梯度</td>
+<td>4小时</td>
+<td>GRPO rewards, clip loss, train step</td>
+</tr>
+<tr>
+<td>Phase 3: DPO + 评估</td>
+<td>3小时</td>
+<td>DPO loss, MMLU/GSM8K parsing</td>
+</tr>
+<tr>
+<td><strong>阅读 DeepSeek-R1 论文</strong></td>
+<td>2小时</td>
+<td>理解 GRPO 在 R1 中的应用</td>
+</tr>
+<tr>
+<td><strong>对照 vLLM GRPO 整合</strong></td>
+<td>2小时</td>
+<td>理解推理服务在 RL 训练中的角色</td>
+</tr>
+</tbody>
+</table>
+<p><strong>总计</strong>: ~14小时</p>
+<hr />
+<h2 id="_7">✅ 关键学习成果</h2>
+<p>完成 Assignment 5 后，您将理解：
+- 🎓 <strong>SFT → RLHF → DPO 的演进</strong>: 对齐技术的发展脉络
+- 🧠 <strong>GRPO 算法详解</strong>: DeepSeek-R1 的核心训练方法
+- 🔄 <strong>策略梯度 + Clipping</strong>: PPO/GRPO 的数学原理
+- 🆚 <strong>DPO vs RLHF</strong>: 各自的优缺点
+- 🚀 <strong>vLLM 在 RL 训练中的角色</strong>: 为什么高效推理对 alignment 训练至关重要
+- 📊 <strong>模型评估</strong>: MMLU/GSM8K 的评估方法</p>
+<hr />
+<h2 id="_8">💡 学习建议</h2>
+<p>Assignment 5 是 <strong>最前沿</strong> 的内容 (GRPO 来自 2024-2025 年的论文)，建议:</p>
+<ol>
+<li><strong>先理解 SFT</strong> — 这是基础，概念最简单</li>
+<li><strong>再学 REINFORCE</strong> — 理解基础策略梯度</li>
+<li><strong>然后学 GRPO</strong> — 在 REINFORCE 基础上增加组归一化和裁剪</li>
+<li><strong>最后学 DPO</strong> — 独立的对齐方法</li>
+<li><strong>读 DeepSeek-R1 论文</strong> — 看 GRPO 如何在实际中训练推理模型</li>
+</ol>
+<script>
+  document.addEventListener("DOMContentLoaded", function() {
+    if (typeof renderMathInElement !== 'undefined') {
+      renderMathInElement(document.body, {
+        delimiters: [
+          {left: "$$", right: "$$", display: true},
+          {left: "$", right: "$", display: false}
+        ],
+        throwOnError: false
+      });
+    }
+  });
+</script>
+</body>
+</html>

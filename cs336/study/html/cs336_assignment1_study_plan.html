@@ -1,0 +1,568 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>cs336_assignment1_study_plan</title>
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700;800;900&family=JetBrains+Mono:wght@400;500;600&family=Noto+Sans+SC:wght@300;400;500;700&display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/KaTeX/0.16.9/katex.min.css">
+  <script defer src="https://cdnjs.cloudflare.com/ajax/libs/KaTeX/0.16.9/katex.min.js"></script>
+  <script defer src="https://cdnjs.cloudflare.com/ajax/libs/KaTeX/0.16.9/contrib/auto-render.min.js" onload="renderMathInElement(document.body);"></script>
+  <style>
+    :root {
+      --bg-primary: #0a0e1a;
+      --bg-secondary: #111827;
+      --bg-card: #1a2236;
+      --bg-code: #0d1117;
+      --border-subtle: rgba(255,255,255,0.06);
+      --border-accent: rgba(99,102,241,0.3);
+      --text-primary: #e2e8f0;
+      --text-secondary: #94a3b8;
+      --text-muted: #64748b;
+      --accent-blue: #3b82f6;
+      --accent-purple: #8b5cf6;
+      --radius: 12px;
+      --radius-sm: 8px;
+    }
+    body {
+      font-family: 'Inter', 'Noto Sans SC', sans-serif;
+      background: var(--bg-primary);
+      color: var(--text-primary);
+      line-height: 1.7;
+      font-size: 16px;
+      padding: 40px;
+      max-width: 900px;
+      margin: 0 auto;
+    }
+    h1, h2, h3, h4, h5 { color: var(--text-primary); margin-top: 1.5em; margin-bottom: 0.5em; }
+    h1 { font-size: 2.2em; border-bottom: 2px solid var(--border-subtle); padding-bottom: 0.3em; }
+    h2 { font-size: 1.8em; border-bottom: 1px solid var(--border-subtle); padding-bottom: 0.3em; }
+    h3 { font-size: 1.4em; }
+    p, ul, ol { margin-bottom: 1em; color: var(--text-secondary); }
+    a { color: var(--accent-blue); text-decoration: none; }
+    a:hover { text-decoration: underline; }
+    code {
+      font-family: 'JetBrains Mono', monospace;
+      font-size: 0.9em;
+      background: rgba(139,92,246,0.1);
+      color: var(--accent-purple);
+      padding: 0.2em 0.4em;
+      border-radius: 4px;
+    }
+    pre {
+      background: var(--bg-code);
+      border: 1px solid var(--border-subtle);
+      border-radius: var(--radius-sm);
+      padding: 1em;
+      overflow-x: auto;
+      margin: 1em 0;
+    }
+    pre code {
+      background: transparent;
+      color: #c9d1d9;
+      padding: 0;
+    }
+    blockquote {
+      border-left: 4px solid var(--accent-purple);
+      padding-left: 1em;
+      margin: 1em 0;
+      color: var(--text-muted);
+      background: rgba(139,92,246,0.05);
+      border-radius: 0 var(--radius-sm) var(--radius-sm) 0;
+      padding: 10px 15px;
+    }
+    table {
+      width: 100%;
+      border-collapse: collapse;
+      margin: 1em 0;
+    }
+    th, td {
+      padding: 10px;
+      border: 1px solid var(--border-subtle);
+      text-align: left;
+    }
+    th { background: var(--bg-card); }
+    img { max-width: 100%; border-radius: var(--radius-sm); }
+    hr { border: 0; border-top: 1px solid var(--border-subtle); margin: 2em 0; }
+  </style>
+</head>
+<body>
+<h1 id="cs336-assignment-1-basics-">CS336 Assignment 1: Basics - 学习计划</h1>
+<blockquote>
+<p><strong>目标</strong>: 从零构建 LLM 的所有基础组件 —— Tokenizer、Transformer 架构、训练循环</p>
+</blockquote>
+<hr />
+<h2 id="assignment-1">📋 Assignment 1 任务概览</h2>
+<table>
+<thead>
+<tr>
+<th>模块</th>
+<th>任务描述</th>
+<th>难度</th>
+<th>vLLM 对应概念</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><strong>BPE Tokenizer</strong></td>
+<td>实现 Byte-Pair Encoding 分词器训练和推理</td>
+<td>⭐⭐⭐</td>
+<td>模型输入预处理</td>
+</tr>
+<tr>
+<td><strong>Softmax</strong></td>
+<td>实现数值稳定的 softmax</td>
+<td>⭐</td>
+<td>注意力计算基础</td>
+</tr>
+<tr>
+<td><strong>SiLU</strong></td>
+<td>实现 SiLU 激活函数</td>
+<td>⭐</td>
+<td>FFN 激活函数</td>
+</tr>
+<tr>
+<td><strong>RMSNorm</strong></td>
+<td>实现 Root Mean Square Normalization</td>
+<td>⭐⭐</td>
+<td>Llama/Qwen 模型的 LayerNorm</td>
+</tr>
+<tr>
+<td><strong>RoPE</strong></td>
+<td>实现 Rotary Positional Embedding</td>
+<td>⭐⭐⭐</td>
+<td>现代 LLM 的位置编码</td>
+</tr>
+<tr>
+<td><strong>Linear</strong></td>
+<td>实现无 bias 线性层</td>
+<td>⭐</td>
+<td>模型的基础构建块</td>
+</tr>
+<tr>
+<td><strong>Embedding</strong></td>
+<td>实现查表式嵌入层</td>
+<td>⭐</td>
+<td>Token → 向量映射</td>
+</tr>
+<tr>
+<td><strong>SwiGLU</strong></td>
+<td>实现 SwiGLU 前馈网络</td>
+<td>⭐⭐</td>
+<td>现代 FFN (Llama/Qwen)</td>
+</tr>
+<tr>
+<td><strong>Scaled Dot-Product Attention</strong></td>
+<td>实现注意力机制</td>
+<td>⭐⭐</td>
+<td>FlashAttention 的前身</td>
+</tr>
+<tr>
+<td><strong>Multi-Head Self-Attention</strong></td>
+<td>实现多头注意力 (含 RoPE)</td>
+<td>⭐⭐⭐</td>
+<td>vLLM 核心计算</td>
+</tr>
+<tr>
+<td><strong>Transformer Block</strong></td>
+<td>组装 Pre-Norm Transformer 层</td>
+<td>⭐⭐</td>
+<td>模型的一层</td>
+</tr>
+<tr>
+<td><strong>Transformer LM</strong></td>
+<td>组装完整语言模型</td>
+<td>⭐⭐</td>
+<td>端到端模型</td>
+</tr>
+<tr>
+<td><strong>Cross-Entropy Loss</strong></td>
+<td>实现交叉熵损失函数</td>
+<td>⭐⭐</td>
+<td>训练目标</td>
+</tr>
+<tr>
+<td><strong>AdamW Optimizer</strong></td>
+<td>实现 AdamW 优化器</td>
+<td>⭐⭐⭐</td>
+<td>训练核心</td>
+</tr>
+<tr>
+<td><strong>Cosine LR Schedule</strong></td>
+<td>实现余弦学习率衰减 + warmup</td>
+<td>⭐⭐</td>
+<td>训练超参数</td>
+</tr>
+<tr>
+<td><strong>Gradient Clipping</strong></td>
+<td>实现梯度裁剪</td>
+<td>⭐</td>
+<td>训练稳定性</td>
+</tr>
+<tr>
+<td><strong>Checkpoint Save/Load</strong></td>
+<td>模型序列化/反序列化</td>
+<td>⭐⭐</td>
+<td>vLLM 加载模型权重</td>
+</tr>
+<tr>
+<td><strong>数据加载 (get_batch)</strong></td>
+<td>实现数据批次采样</td>
+<td>⭐⭐</td>
+<td>训练数据流</td>
+</tr>
+</tbody>
+</table>
+<hr />
+<h2 id="_1">🎯 学习路径</h2>
+<h3 id="phase-1-2">Phase 1: 基础数学组件 (2小时)</h3>
+<p>？ <strong>PyTorch 把 <code>Linear</code> 的权重存成：</strong></p>
+<pre><code>(out_features, in_features)
+</code></pre>
+<p>而不是：</p>
+<pre><code>(in_features, out_features)
+</code></pre>
+<p>主要是因为：</p>
+<blockquote>
+<p>👉 <strong>这样更符合“每一行 = 一个神经元”的直觉 + 更利于底层高性能计算 + 符合数学传统。</strong></p>
+</blockquote>
+<p>所以算的时候才写：</p>
+<pre><code>x @ W.T
+</code></pre>
+<p>而不是 <code>x @ W</code>。</p>
+<p><strong>实现</strong>: <code>softmax</code>, <code>silu</code>, <code>cross_entropy</code>, <code>rmsnorm</code></p>
+<pre><code class="language-python"># Softmax — 数值稳定版本
+def softmax(x, dim=-1):
+    x_max = x.max(dim=dim, keepdim=True).values
+    x_exp = torch.exp(x - x_max)  # 减去最大值防止溢出
+    return x_exp / x_exp.sum(dim=dim, keepdim=True)
+
+# RMSNorm — Llama/Qwen 使用的归一化
+class RMSNorm(nn.Module):
+    def forward(self, x):
+        rms = torch.rsqrt(x.pow(2).mean(-1, keepdim=True) + self.eps)
+        return self.weight * (x * rms)
+
+# SiLU — 又名 Swish 激活函数  
+def silu(x):
+    return x * torch.sigmoid(x)
+
+# Cross Entropy Loss with Derivation
+def cross_entropy(logits, targets):
+    # nll = - log P(target)
+    # P(target) = exp(x_target) / sum(exp(x_j))
+    # log P(target) = x_target - log(sum(exp(x_j))) = x_target - LogSumExp(x)
+    # Loss = - (x_target - LogSumExp(x))
+
+    log_z = torch.logsumexp(logits, dim=-1)
+    target_logits = logits[range(len(logits)), targets]
+    loss = - (target_logits - log_z)
+    return loss.mean()
+</code></pre>
+<p><strong>Cross Entropy 详细推导</strong>:</p>
+<p><strong>一、从「概率」开始</strong>
+分类模型最后一层输出的是 logits $z = [z_1, z_2, ..., z_V]$。它们不是概率，只是“分数”。
+我们要先变成概率 → 用 Softmax：
+$$ p_j = \frac{e^{z_j}}{\sum_k e^{z_k}} $$</p>
+<p>(应该是第 $j$ 类的预测概率)</p>
+<p><strong>二、交叉熵的原始定义</strong>
+真实标签是 one-hot。比如第 $i$ 个样本真实类别是 $y$: <code>[0, 0, 1, 0, 0]</code>。
+交叉熵定义是：
+$$ L = -\sum_j y_j \log(p_j) $$
+其中 $y_j$ 只有正确类是 1，其他都是 0。
+所以其实：
+$$ L = -\log(p_y) $$
+👉 只看正确类别的概率。</p>
+<p><strong>三、代入 Softmax</strong>
+刚才：$p_y = \frac{e^{z_y}}{\sum_j e^{z_j}}$
+带进去：
+$$ L = -\log \left( \frac{e^{z_y}}{\sum_j e^{z_j}} \right) $$</p>
+<p><strong>四、拆 Log（关键一步）</strong>
+用对数公式 $\log \frac{a}{b} = \log a - \log b$：
+$$ L = - (\log e^{z_y} - \log \sum_j e^{z_j}) $$
+又因为 $\log e^x = x$，变成：
+$$ L = - (z_y - \log \sum_j e^{z_j}) $$</p>
+<p><strong>五、加上 Batch 维度</strong>
+对第 $i$ 个样本：
+$$ L_i = -(z_{i, y_i} - \log \sum_j e^{z_{i, j}}) $$
+这就是代码中 <code>loss = - (target_logits - log_z)</code> 的数学来源。这个公式更加数值稳定，不需要显式计算 <code>exp(x)</code> 再除法。</p>
+<p><strong>💡 与 vLLM 对照</strong>: 
+- vLLM 中的 RMSNorm: <code>vllm/model_executor/layers/layernorm.py</code>
+- Qwen3 模型使用 RMSNorm + SwiGLU 正是这里学到的组合</p>
+<hr />
+<h3 id="phase-2-rope-2">Phase 2: 位置编码 RoPE (2小时)</h3>
+<p><strong>RoPE (Rotary Positional Embedding)</strong> 是现代 LLM 的标配位置编码。</p>
+<pre><code>核心思想:
+┌──────────────────────────────────────────┐
+│  将位置信息编码为旋转操作                  │
+│  对 query/key 向量对施加 2D 旋转          │
+│                                          │
+│  x = [x₁, x₂, x₃, x₄, ...]            │
+│  配对: (x₁,x₂), (x₃,x₄), ...           │
+│  每对做旋转:                              │
+│    x₁' = x₁·cos(θ) - x₂·sin(θ)         │
+│    x₂' = x₁·sin(θ) + x₂·cos(θ)         │
+│  θ = position × base^(-2i/d)            │
+└──────────────────────────────────────────┘
+</code></pre>
+<p><strong>💡 与 vLLM 对照</strong>:</p>
+<ul>
+<li>
+<p><code>vllm/model_executor/layers/rotary_embedding.py</code></p>
+</li>
+<li>
+<p>Qwen3 中 RoPE 的调用: <code>Qwen3RotaryEmbedding</code></p>
+</li>
+<li>
+<p><img alt="" src="cs336_assignment1_study_plan.assets/image-20260216121644108.png" /></p>
+</li>
+<li>
+<p>这正是标准的 <strong>2D 旋转矩阵</strong>乘法展开形式：</p>
+</li>
+</ul>
+<p>$$  \begin{pmatrix} x_1' \ x_2' \end{pmatrix} = \begin{pmatrix} \cos\theta &amp; -\sin\theta \ \sin\theta &amp; \cos\theta \end{pmatrix} \begin{pmatrix} x_1 \ x_2 \end{pmatrix}$$</p>
+<hr />
+<h3 id="phase-3-3">Phase 3: 注意力机制 (3小时)</h3>
+<p><strong>从 Scaled Dot-Product → Multi-Head Self-Attention</strong></p>
+<pre><code>Scaled Dot-Product Attention:
+  Attention(Q,K,V) = softmax(QK^T / √d_k) · V
+
+Multi-Head Attention:
+  1. 线性投影 Q,K,V 到 num_heads 个子空间
+  2. 每个 head 独立计算 attention
+  3. concat 所有 head 的输出
+  4. 最终线性投影
+
+SwiGLU FFN:
+  SwiGLU(x) = (SiLU(xW₁) ⊙ xW₃) · W₂
+</code></pre>
+<p><strong>💡 与 vLLM 对照</strong>:
+- <code>scaled_dot_product_attention</code> → 这正是 FlashAttention 要优化的计算
+- 理解 Q/K/V 投影 → 理解 vLLM 中的 <code>QKVParallelLinear</code>
+- 参考实现在 <code>cs336-basics/model.py</code> 中的 <code>CausalMultiHeadSelfAttention</code></p>
+<hr />
+<h3 id="phase-4-2">Phase 4: 组装完整模型 (2小时)</h3>
+<pre><code>BasicsTransformerLM
+├── Embedding(vocab_size, d_model)           # Token 嵌入
+├── RotaryEmbedding(context_length, d_head)  # RoPE
+├── TransformerBlock × num_layers            # Pre-Norm Transformer
+│   ├── RMSNorm(d_model)                     # 第一个 LayerNorm
+│   ├── CausalMultiHeadSelfAttention         # 多头注意力
+│   │   ├── q_proj: Linear(d_model, d_model)
+│   │   ├── k_proj: Linear(d_model, d_model)
+│   │   ├── v_proj: Linear(d_model, d_model)
+│   │   ├── RoPE on Q and K
+│   │   ├── Causal Mask
+│   │   ├── scaled_dot_product_attention
+│   │   └── output_proj: Linear(d_model, d_model)
+│   ├── RMSNorm(d_model)                     # 第二个 LayerNorm
+│   └── SwiGLU(d_model, d_ff)               # FFN
+│       ├── w1: Linear(d_model, d_ff)
+│       ├── w2: Linear(d_ff, d_model)
+│       └── w3: Linear(d_model, d_ff)
+├── RMSNorm(d_model)                         # 最终 LayerNorm
+└── lm_head: Linear(d_model, vocab_size)     # 输出投影
+</code></pre>
+<hr />
+<h3 id="phase-5-bpe-tokenizer-3">Phase 5: BPE Tokenizer (3小时)</h3>
+<p><strong>BPE (Byte-Pair Encoding)</strong> 分词器：</p>
+<pre><code>训练算法:
+1. 初始化 vocab 为所有单字节 (256个)
+2. 重复直到 vocab_size:
+   a. 找到语料中最频繁的相邻 token 对
+   b. 合并该 token 对为新 token
+   c. 加入 vocab
+
+推理算法 (Encode):
+1. 将文本拆分为字节序列
+2. 按照合并规则的优先级，反复合并相邻 token
+3. 输出 token ID 序列
+
+Decode:
+- 将 token ID 映射回字节，拼接为文本
+</code></pre>
+<p><strong>💡 与 vLLM 对照</strong>:
+- vLLM 使用 HuggingFace tokenizer，但底层原理相同
+- 理解 tokenizer 有助于理解 prompt 长度计算和 KV cache 大小</p>
+<hr />
+<h3 id="phase-6-3">Phase 6: 训练组件 (3小时)</h3>
+<p><strong>AdamW</strong>, <strong>Cosine Schedule</strong>, <strong>Gradient Clipping</strong>, <strong>Checkpoint</strong></p>
+<pre><code class="language-python"># AdamW 核心更新规则
+m = β₁ * m + (1 - β₁) * grad           # 一阶动量
+v = β₂ * v + (1 - β₂) * grad²          # 二阶动量
+m_hat = m / (1 - β₁^t)                  # 偏差修正
+v_hat = v / (1 - β₂^t)                  # 偏差修正
+param = param - lr * (m_hat / (√v_hat + ε) + weight_decay * param)
+
+# Cosine Schedule with Warmup
+if t &lt; T_warmup:
+    lr = t / T_warmup * lr_max           # 线性 warmup
+elif t &lt; T_cosine:
+    lr = lr_min + 0.5 * (lr_max - lr_min) * (1 + cos(π * (t - T_w) / (T_c - T_w)))
+else:
+    lr = lr_min                          # 保持最小学习率
+
+# Gradient Clipping with Derivation
+def gradient_clipping(parameters, max_l2_norm):
+    # 1. 计算所有梯度拼接后的 L2 范数
+    # total_norm = sqrt(sum(norm(p.grad)**2))
+    total_norm = torch.norm(torch.stack([torch.norm(p.grad.detach(), 2) for p in parameters]), 2)
+
+    # 2. 计算缩放系数 k
+    # 目标: new_norm &lt;= max_l2_norm (C)
+    # 如果 total_norm (||g||) &gt; C:
+    #    scale = C / ||g||
+    #    new_grad = g * scale
+    #    验证: ||new_grad|| = ||g * (C/||g||)|| = ||g|| * (C/||g||) = C
+    #
+    # 如果 total_norm &lt;= C:
+    #    scale = 1.0 (不改变)
+
+    clip_coef = max_l2_norm / (total_norm + 1e-6)
+    clip_coef = torch.clamp(clip_coef, max=1.0)
+
+    # 3. 原地更新梯度
+    for p in parameters:
+        p.grad.detach().mul_(clip_coef)
+</code></pre>
+<hr />
+<h2 id="vllm">🔗 与 vLLM 的连接</h2>
+<table>
+<thead>
+<tr>
+<th>CS336 组件</th>
+<th>vLLM 位置</th>
+<th>连接说明</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>RMSNorm</td>
+<td><code>vllm/model_executor/layers/layernorm.py</code></td>
+<td>vLLM 使用融合版本</td>
+</tr>
+<tr>
+<td>RoPE</td>
+<td><code>vllm/model_executor/layers/rotary_embedding.py</code></td>
+<td>支持多种 RoPE 变体</td>
+</tr>
+<tr>
+<td>MHA → GQA</td>
+<td><code>vllm/model_executor/layers/attention.py</code></td>
+<td>Assignment 1 是 MHA，vLLM 支持 GQA</td>
+</tr>
+<tr>
+<td>SwiGLU</td>
+<td>模型实现中的 <code>gate_up_proj</code></td>
+<td>Qwen3/Llama 都使用 SwiGLU</td>
+</tr>
+<tr>
+<td>Linear</td>
+<td><code>vllm/model_executor/layers/linear.py</code></td>
+<td>支持 TP 切分的线性层</td>
+</tr>
+<tr>
+<td>Tokenizer</td>
+<td><code>vllm/transformers_utils/tokenizer.py</code></td>
+<td>使用 HuggingFace tokenizer</td>
+</tr>
+</tbody>
+</table>
+<hr />
+<h2 id="_2">📚 配套讲座</h2>
+<ol>
+<li><strong>Lecture 1</strong> (<code>spring2025-lectures/lecture_01.py</code>) — 语言模型基础</li>
+<li><strong>Lecture 2</strong> (<code>spring2025-lectures/lecture_02.py</code>) — 深入理解</li>
+<li><strong>Lecture 3</strong> (<code>nonexecutable/2025 Lecture 3 - architecture.pdf</code>) — 架构设计</li>
+<li><strong>Lecture 4</strong> (<code>nonexecutable/2025 Lecture 4 - MoEs.pdf</code>) — 混合专家模型</li>
+</ol>
+<hr />
+<h2 id="_3">🧪 测试命令</h2>
+<pre><code class="language-bash">cd D:\projects\vllm\cs336\assignment1-basics
+
+# 安装依赖
+uv sync
+
+# 运行所有测试
+uv run pytest tests/ -v
+
+# 单独测试各模块
+uv run pytest tests/test_nn_utils.py -v      # softmax, silu, cross_entropy
+uv run pytest tests/test_model.py -v          # 模型组件
+uv run pytest tests/test_tokenizer.py -v      # Tokenizer
+uv run pytest tests/test_train_bpe.py -v      # BPE 训练
+uv run pytest tests/test_optimizer.py -v      # AdamW
+uv run pytest tests/test_data.py -v           # 数据加载
+uv run pytest tests/test_serialization.py -v  # Checkpoint
+</code></pre>
+<hr />
+<h2 id="_4">📅 学习时间安排</h2>
+<table>
+<thead>
+<tr>
+<th>阶段</th>
+<th>预计时间</th>
+<th>产出</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>Phase 1: 基础数学组件</td>
+<td>2小时</td>
+<td>softmax, RMSNorm, SiLU, cross_entropy</td>
+</tr>
+<tr>
+<td>Phase 2: RoPE</td>
+<td>2小时</td>
+<td>旋转位置编码</td>
+</tr>
+<tr>
+<td>Phase 3: 注意力机制</td>
+<td>3小时</td>
+<td>SDPA + Multi-Head Attention</td>
+</tr>
+<tr>
+<td>Phase 4: 组装模型</td>
+<td>2小时</td>
+<td>完整 Transformer LM</td>
+</tr>
+<tr>
+<td>Phase 5: BPE Tokenizer</td>
+<td>3小时</td>
+<td>分词器训练和推理</td>
+</tr>
+<tr>
+<td>Phase 6: 训练组件</td>
+<td>3小时</td>
+<td>AdamW, LR Schedule, Checkpoint</td>
+</tr>
+<tr>
+<td><strong>对照 vLLM 源码</strong></td>
+<td>2小时</td>
+<td>深入理解</td>
+</tr>
+</tbody>
+</table>
+<p><strong>总计</strong>: ~17小时</p>
+<hr />
+<h2 id="_5">✅ 关键学习成果</h2>
+<p>完成 Assignment 1 后，您将理解：
+- 🧩 <strong>一个 LLM 的完整组成</strong>: 从 tokenizer 到最终输出
+- 🔧 <strong>每个组件的数学原理</strong>: RoPE、SwiGLU、RMSNorm 为什么这样设计
+- 📊 <strong>训练流程</strong>: 数据加载 → 前向传播 → 损失计算 → 反向传播 → 参数更新
+- 🔗 <strong>与 vLLM 的联系</strong>: 这些组件在生产推理系统中如何使用</p>
+<script>
+  document.addEventListener("DOMContentLoaded", function() {
+    if (typeof renderMathInElement !== 'undefined') {
+      renderMathInElement(document.body, {
+        delimiters: [
+          {left: "$$", right: "$$", display: true},
+          {left: "$", right: "$", display: false}
+        ],
+        throwOnError: false
+      });
+    }
+  });
+</script>
+</body>
+</html>

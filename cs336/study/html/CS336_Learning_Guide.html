@@ -1,0 +1,615 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>CS336_Learning_Guide</title>
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700;800;900&family=JetBrains+Mono:wght@400;500;600&family=Noto+Sans+SC:wght@300;400;500;700&display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/KaTeX/0.16.9/katex.min.css">
+  <script defer src="https://cdnjs.cloudflare.com/ajax/libs/KaTeX/0.16.9/katex.min.js"></script>
+  <script defer src="https://cdnjs.cloudflare.com/ajax/libs/KaTeX/0.16.9/contrib/auto-render.min.js" onload="renderMathInElement(document.body);"></script>
+  <style>
+    :root {
+      --bg-primary: #0a0e1a;
+      --bg-secondary: #111827;
+      --bg-card: #1a2236;
+      --bg-code: #0d1117;
+      --border-subtle: rgba(255,255,255,0.06);
+      --border-accent: rgba(99,102,241,0.3);
+      --text-primary: #e2e8f0;
+      --text-secondary: #94a3b8;
+      --text-muted: #64748b;
+      --accent-blue: #3b82f6;
+      --accent-purple: #8b5cf6;
+      --radius: 12px;
+      --radius-sm: 8px;
+    }
+    body {
+      font-family: 'Inter', 'Noto Sans SC', sans-serif;
+      background: var(--bg-primary);
+      color: var(--text-primary);
+      line-height: 1.7;
+      font-size: 16px;
+      padding: 40px;
+      max-width: 900px;
+      margin: 0 auto;
+    }
+    h1, h2, h3, h4, h5 { color: var(--text-primary); margin-top: 1.5em; margin-bottom: 0.5em; }
+    h1 { font-size: 2.2em; border-bottom: 2px solid var(--border-subtle); padding-bottom: 0.3em; }
+    h2 { font-size: 1.8em; border-bottom: 1px solid var(--border-subtle); padding-bottom: 0.3em; }
+    h3 { font-size: 1.4em; }
+    p, ul, ol { margin-bottom: 1em; color: var(--text-secondary); }
+    a { color: var(--accent-blue); text-decoration: none; }
+    a:hover { text-decoration: underline; }
+    code {
+      font-family: 'JetBrains Mono', monospace;
+      font-size: 0.9em;
+      background: rgba(139,92,246,0.1);
+      color: var(--accent-purple);
+      padding: 0.2em 0.4em;
+      border-radius: 4px;
+    }
+    pre {
+      background: var(--bg-code);
+      border: 1px solid var(--border-subtle);
+      border-radius: var(--radius-sm);
+      padding: 1em;
+      overflow-x: auto;
+      margin: 1em 0;
+    }
+    pre code {
+      background: transparent;
+      color: #c9d1d9;
+      padding: 0;
+    }
+    blockquote {
+      border-left: 4px solid var(--accent-purple);
+      padding-left: 1em;
+      margin: 1em 0;
+      color: var(--text-muted);
+      background: rgba(139,92,246,0.05);
+      border-radius: 0 var(--radius-sm) var(--radius-sm) 0;
+      padding: 10px 15px;
+    }
+    table {
+      width: 100%;
+      border-collapse: collapse;
+      margin: 1em 0;
+    }
+    th, td {
+      padding: 10px;
+      border: 1px solid var(--border-subtle);
+      text-align: left;
+    }
+    th { background: var(--bg-card); }
+    img { max-width: 100%; border-radius: var(--radius-sm); }
+    hr { border: 0; border-top: 1px solid var(--border-subtle); margin: 2em 0; }
+  </style>
+</head>
+<body>
+<h1 id="cs336-vllm">CS336 学习指南：从基础到 vLLM 实践</h1>
+<h2 id="_1">📚 课程概览</h2>
+<p><strong>CS336: Language Modeling from Scratch</strong> 是斯坦福大学的一门深度学习课程，专注于从零开始构建语言模型。本课程涵盖了从基础实现到产品级系统优化的完整知识链。</p>
+<h3 id="vllm">课程与 vLLM 的关系</h3>
+<p>vLLM 是一个高性能的 LLM 推理和服务框架，实现了许多 CS336 中讨论的高级优化技术。学习 CS336 可以帮助你：</p>
+<ol>
+<li><strong>理解 vLLM 的底层原理</strong> - CS336 讲解的技术如 FlashAttention、分布式训练等都在 vLLM 中有实际应用</li>
+<li><strong>从头实现核心算法</strong> - 通过作业动手实现，加深对 vLLM 源码的理解</li>
+<li><strong>建立系统性思维</strong> - 理解从训练到推理的完整优化链路</li>
+</ol>
+<h3 id="_2">推荐学习路径</h3>
+<pre><code>CS336 Assignment 1 (基础) → CS336 Assignment 2 (系统优化) 
+                                    ↓
+                          理解 vLLM 源码架构
+                                    ↓
+CS336 Assignment 3 (Scaling Laws) ← 规模化训练原理
+                                    ↓
+CS336 Assignment 4 (数据) → CS336 Assignment 5 (对齐)
+</code></pre>
+<hr />
+<h2 id="assignment">📋 Assignment 详细内容</h2>
+<h3 id="assignment-1-basics">Assignment 1: Basics（基础）</h3>
+<p><strong>主题</strong>: 从零构建 Transformer 语言模型</p>
+<h4 id="_3">核心实现内容</h4>
+<table>
+<thead>
+<tr>
+<th>模块</th>
+<th>描述</th>
+<th>vLLM 对应</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><strong>Linear/Embedding</strong></td>
+<td>实现基础神经网络层</td>
+<td><code>vllm/model_executor/layers/</code></td>
+</tr>
+<tr>
+<td><strong>RMSNorm</strong></td>
+<td>实现 Root Mean Square Normalization</td>
+<td>模型归一化层</td>
+</tr>
+<tr>
+<td><strong>SiLU/SwiGLU</strong></td>
+<td>激活函数和前馈网络</td>
+<td>FFN 层实现</td>
+</tr>
+<tr>
+<td><strong>Scaled Dot-Product Attention</strong></td>
+<td>注意力机制基础</td>
+<td>理解 PagedAttention 的前置知识</td>
+</tr>
+<tr>
+<td><strong>Multi-Head Self-Attention</strong></td>
+<td>多头注意力 + RoPE 位置编码</td>
+<td>vLLM 的 attention 实现</td>
+</tr>
+<tr>
+<td><strong>Transformer Block</strong></td>
+<td>完整的 Transformer 层</td>
+<td>模型架构基础</td>
+</tr>
+<tr>
+<td><strong>Transformer LM</strong></td>
+<td>完整的语言模型</td>
+<td>理解如何加载模型权重</td>
+</tr>
+<tr>
+<td><strong>BPE Tokenizer</strong></td>
+<td>字节对编码分词器训练</td>
+<td>理解 tokenizer 工作原理</td>
+</tr>
+<tr>
+<td><strong>AdamW Optimizer</strong></td>
+<td>优化器实现</td>
+<td>训练相关</td>
+</tr>
+<tr>
+<td><strong>Cosine LR Schedule</strong></td>
+<td>学习率调度</td>
+<td>训练相关</td>
+</tr>
+<tr>
+<td><strong>Checkpoint Save/Load</strong></td>
+<td>模型序列化</td>
+<td>权重加载机制</td>
+</tr>
+</tbody>
+</table>
+<h4 id="_4">数据集</h4>
+<ul>
+<li><strong>TinyStories</strong>: 用于训练小规模模型的故事数据集</li>
+<li><strong>OpenWebText (sample)</strong>: 网页文本样本</li>
+</ul>
+<h4 id="_5">关键代码位置</h4>
+<pre><code>cs336/assignment1-basics/
+├── cs336_basics/          # 你需要实现的模块
+├── tests/adapters.py      # 测试适配器（定义了所有需要实现的接口）
+└── tests/test_*.py        # 单元测试
+</code></pre>
+<hr />
+<h3 id="assignment-2-systems">Assignment 2: Systems（系统优化）</h3>
+<p><strong>主题</strong>: 高性能训练系统实现</p>
+<h4 id="_6">核心实现内容</h4>
+<table>
+<thead>
+<tr>
+<th>模块</th>
+<th>描述</th>
+<th>vLLM 对应</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><strong>FlashAttention (PyTorch)</strong></td>
+<td>用纯 PyTorch 实现 FlashAttention</td>
+<td>理解内存优化原理</td>
+</tr>
+<tr>
+<td><strong>FlashAttention (Triton)</strong></td>
+<td>使用 Triton 编写自定义 CUDA kernel</td>
+<td>vLLM 的 Triton kernels</td>
+</tr>
+<tr>
+<td><strong>DDP (Individual Parameters)</strong></td>
+<td>逐参数分布式数据并行</td>
+<td>多 GPU 训练基础</td>
+</tr>
+<tr>
+<td><strong>DDP (Bucketed)</strong></td>
+<td>分桶 DDP，优化通信开销</td>
+<td>理解梯度同步机制</td>
+</tr>
+<tr>
+<td><strong>Sharded Optimizer</strong></td>
+<td>优化器状态分片（类似 ZeRO-1）</td>
+<td>大模型训练技术</td>
+</tr>
+</tbody>
+</table>
+<h4 id="_7">关键技术点</h4>
+<p><strong>FlashAttention 算法核心</strong>:</p>
+<pre><code class="language-python"># 核心思想：分块计算 + Online Softmax
+# 避免存储 O(N²) 的注意力矩阵
+for i in range(0, N, block_size):      # 遍历 Q 块
+    for j in range(0, N, block_size):  # 遍历 K, V 块
+        # 1. 计算局部注意力分数
+        # 2. 使用 Online Softmax 更新全局状态
+        # 3. 累积输出
+</code></pre>
+<p><strong>分布式训练</strong>:
+- <strong>Ring-AllReduce</strong>: 高效的梯度聚合
+- <strong>Bucket 策略</strong>: 将小梯度打包，提高通信效率
+- <strong>通信-计算重叠</strong>: 异步通信隐藏延迟</p>
+<h4 id="vllm_1">与 vLLM 的深度关联</h4>
+<ul>
+<li>vLLM 使用 FlashAttention 进行高效推理</li>
+<li>理解 Triton kernel 编写有助于理解 vLLM 的 <code>csrc/</code> 目录</li>
+</ul>
+<hr />
+<h3 id="assignment-3-scaling">Assignment 3: Scaling（规模化）</h3>
+<p><strong>主题</strong>: Scaling Laws（规模法则）研究</p>
+<h4 id="_8">核心内容</h4>
+<table>
+<thead>
+<tr>
+<th>主题</th>
+<th>描述</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><strong>Chinchilla Scaling Laws</strong></td>
+<td>模型大小 vs 数据量 vs 计算量的最优配比</td>
+</tr>
+<tr>
+<td><strong>实验设计</strong></td>
+<td>如何设计实验验证 Scaling Laws</td>
+</tr>
+<tr>
+<td><strong>Compute-Optimal Training</strong></td>
+<td>给定计算预算，如何分配模型大小和训练数据</td>
+</tr>
+</tbody>
+</table>
+<h4 id="_9">关键公式</h4>
+<p><strong>Kaplan (OpenAI) Scaling Law</strong>:
+$$L(N) = \left(\frac{N_c}{N}\right)^{\alpha_N}$$</p>
+<p><strong>Chinchilla Scaling Law</strong>:
+$$L(N, D) = E + \frac{A}{N^\alpha} + \frac{B}{D^\beta}$$</p>
+<p>其中:
+- $N$ = 模型参数量
+- $D$ = 训练数据量 (tokens)
+- $L$ = 损失
+- $E$ = 不可约损失</p>
+<h4 id="_10">实践意义</h4>
+<ul>
+<li>理解为什么 LLaMA 系列在给定规模下表现优秀</li>
+<li>帮助规划训练资源分配</li>
+</ul>
+<hr />
+<h3 id="assignment-4-data">Assignment 4: Data（数据处理）</h3>
+<p><strong>主题</strong>: 训练数据质量与处理</p>
+<h4 id="_11">核心实现内容</h4>
+<table>
+<thead>
+<tr>
+<th>模块</th>
+<th>描述</th>
+<th>技术细节</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><strong>HTML 文本提取</strong></td>
+<td>从网页中提取纯文本</td>
+<td>使用 trafilatura 等工具</td>
+</tr>
+<tr>
+<td><strong>语言识别</strong></td>
+<td>识别文本语言</td>
+<td>fastText 语言检测</td>
+</tr>
+<tr>
+<td><strong>PII 脱敏</strong></td>
+<td>个人信息保护</td>
+<td>邮箱、电话、IP 地址掩码</td>
+</tr>
+<tr>
+<td><strong>NSFW/毒性检测</strong></td>
+<td>有害内容过滤</td>
+<td>分类器实现</td>
+</tr>
+<tr>
+<td><strong>质量过滤</strong></td>
+<td>数据质量评估</td>
+<td>Gopher 质量过滤规则</td>
+</tr>
+<tr>
+<td><strong>精确去重</strong></td>
+<td>行级别精确匹配</td>
+<td>哈希去重</td>
+</tr>
+<tr>
+<td><strong>MinHash 去重</strong></td>
+<td>近似文档去重</td>
+<td>LSH (局部敏感哈希)</td>
+</tr>
+</tbody>
+</table>
+<h4 id="gopher">Gopher 质量过滤规则示例</h4>
+<pre><code class="language-python">def gopher_quality_filter(text: str) -&gt; bool:
+    &quot;&quot;&quot;
+    Based on DeepMind's Gopher paper filtering rules:
+    - 文档长度限制
+    - 平均单词长度
+    - 标点符号比例
+    - 重复 n-gram 比例
+    - &quot;the&quot;, &quot;be&quot;, &quot;to&quot; 等常见词存在性
+    &quot;&quot;&quot;
+    pass
+</code></pre>
+<h4 id="_12">与大规模预训练的关系</h4>
+<ul>
+<li>理解为什么 "Garbage in, garbage out"</li>
+<li>数据质量直接影响模型能力</li>
+</ul>
+<hr />
+<h3 id="assignment-5-alignment">Assignment 5: Alignment（对齐）</h3>
+<p><strong>主题</strong>: 让模型与人类意图对齐</p>
+<h4 id="_13">核心实现内容</h4>
+<table>
+<thead>
+<tr>
+<th>模块</th>
+<th>描述</th>
+<th>技术细节</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><strong>SFT (Supervised Fine-Tuning)</strong></td>
+<td>监督微调</td>
+<td>Instruction Following</td>
+</tr>
+<tr>
+<td><strong>GRPO (Group Relative Policy Optimization)</strong></td>
+<td>强化学习对齐</td>
+<td>DeepSeek-R1 的核心算法</td>
+</tr>
+<tr>
+<td><strong>DPO (Direct Preference Optimization)</strong></td>
+<td>直接偏好优化</td>
+<td>无需 RM 的对齐方法</td>
+</tr>
+<tr>
+<td><strong>Reward Modeling</strong></td>
+<td>奖励模型训练</td>
+<td>偏好数据 → 奖励信号</td>
+</tr>
+<tr>
+<td><strong>MMLU/GSM8K 评估</strong></td>
+<td>模型能力评估</td>
+<td>标准化测试</td>
+</tr>
+</tbody>
+</table>
+<h4 id="grpo">GRPO 核心公式</h4>
+<p><strong>优势函数计算</strong>:
+$$A_i = \frac{r_i - \text{mean}(r)}{\text{std}(r) + \epsilon}$$</p>
+<p><strong>GRPO-Clip 损失</strong>:
+$$L = -\mathbb{E}\left[\min\left(\frac{\pi_\theta}{\pi_{\text{old}}} A, \text{clip}\left(\frac{\pi_\theta}{\pi_{\text{old}}}, 1-\epsilon, 1+\epsilon\right) A\right)\right]$$</p>
+<h4 id="_14">可选内容（高级）</h4>
+<ul>
+<li><strong>Safety Alignment</strong>: 安全对齐</li>
+<li><strong>Instruction Tuning</strong>: 指令微调</li>
+<li><strong>RLHF</strong>: 基于人类反馈的强化学习</li>
+</ul>
+<hr />
+<h2 id="cs336-vllm_1">🔗 CS336 与 vLLM 的技术对应</h2>
+<table>
+<thead>
+<tr>
+<th>CS336 内容</th>
+<th>vLLM 对应实现</th>
+<th>文件/目录</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>Transformer 架构</td>
+<td>模型加载器</td>
+<td><code>vllm/model_executor/models/</code></td>
+</tr>
+<tr>
+<td>FlashAttention</td>
+<td>Attention Backend</td>
+<td><code>vllm/attention/</code></td>
+</tr>
+<tr>
+<td>RoPE 位置编码</td>
+<td>模型层</td>
+<td><code>vllm/model_executor/layers/rotary_embedding.py</code></td>
+</tr>
+<tr>
+<td>Tokenizer</td>
+<td>Tokenizer 接口</td>
+<td><code>vllm/transformers_utils/tokenizer.py</code></td>
+</tr>
+<tr>
+<td>分布式训练</td>
+<td>Tensor/Pipeline Parallel</td>
+<td><code>vllm/distributed/</code></td>
+</tr>
+<tr>
+<td>内存优化</td>
+<td>PagedAttention</td>
+<td><code>vllm/attention/backends/</code></td>
+</tr>
+<tr>
+<td>Continuous Batching</td>
+<td>Scheduler</td>
+<td><code>vllm/core/scheduler.py</code></td>
+</tr>
+</tbody>
+</table>
+<hr />
+<h2 id="lectures-assignments">📖 Lectures 与 Assignments 对应</h2>
+<p>CS336 的 Lectures 提供了理论背景：</p>
+<table>
+<thead>
+<tr>
+<th>Lecture</th>
+<th>主题</th>
+<th>对应 Assignment</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>Lecture 01-02</td>
+<td>Transformer 基础</td>
+<td>Assignment 1</td>
+</tr>
+<tr>
+<td>Lecture 06</td>
+<td>Systems, FlashAttention</td>
+<td>Assignment 2</td>
+</tr>
+<tr>
+<td>Lecture 08</td>
+<td>分布式训练</td>
+<td>Assignment 2</td>
+</tr>
+<tr>
+<td>Lecture 10</td>
+<td>推理优化 (KV Cache, Batching)</td>
+<td>理解 vLLM</td>
+</tr>
+<tr>
+<td>Lecture 12</td>
+<td>数据处理</td>
+<td>Assignment 4</td>
+</tr>
+<tr>
+<td>Lecture 13-14</td>
+<td>Scaling Laws</td>
+<td>Assignment 3</td>
+</tr>
+<tr>
+<td>Lecture 17</td>
+<td>Alignment</td>
+<td>Assignment 5</td>
+</tr>
+</tbody>
+</table>
+<hr />
+<h2 id="_15">🚀 建议的学习计划</h2>
+<h3 id="phase-1-2-3">Phase 1: 基础 (2-3 周)</h3>
+<ul>
+<li>[ ] 完成 Assignment 1 的核心模块</li>
+<li>[ ] 阅读 Lecture 01-02 的代码</li>
+<li>[ ] 在 TinyStories 上训练一个小模型</li>
+</ul>
+<h3 id="phase-2-2-3">Phase 2: 系统优化 (2-3 周)</h3>
+<ul>
+<li>[ ] 完成 Assignment 2 的 FlashAttention (PyTorch)</li>
+<li>[ ] 学习 Triton 基础，尝试 Triton 版本</li>
+<li>[ ] 阅读 vLLM 的 <code>docs/flash_attn_scratchpad.py</code> 理解核心思想</li>
+<li>[ ] 理解 DDP 和 Sharded Optimizer</li>
+</ul>
+<h3 id="phase-3-vllm-2-3">Phase 3: 深入 vLLM (2-3 周)</h3>
+<ul>
+<li>[ ] 阅读 Lecture 10 关于推理优化</li>
+<li>[ ] 研究 vLLM 的 Scheduler 和 Block Manager</li>
+<li>[ ] 理解 PagedAttention 如何扩展 FlashAttention</li>
+</ul>
+<h3 id="phase-4-2-3">Phase 4: 高级主题 (2-3 周)</h3>
+<ul>
+<li>[ ] 完成 Assignment 3 理解 Scaling Laws</li>
+<li>[ ] 完成 Assignment 4 了解数据工程</li>
+<li>[ ] 完成 Assignment 5 学习对齐技术</li>
+</ul>
+<hr />
+<h2 id="_16">📁 目录结构说明</h2>
+<pre><code>cs336/
+├── assignment1-basics/          # 基础模块实现
+│   ├── cs336_basics/            # 待实现的代码
+│   ├── tests/                   # 测试用例
+│   └── cs336_spring2025_assignment1_basics.pdf
+│
+├── assignment2-systems/         # 系统优化
+│   ├── cs336-basics/            # Assignment 1 参考实现
+│   ├── cs336_systems/           # 待实现的代码
+│   └── cs336_spring2025_assignment2_systems.pdf
+│
+├── assignment3-scaling/         # Scaling Laws
+│   ├── cs336_scaling/           # 分析代码
+│   └── cs336_spring2025_assignment3_scaling.pdf
+│
+├── assignment4-data/            # 数据处理
+│   ├── cs336_data/              # 待实现的代码
+│   └── cs336_spring2025_assignment4_data.pdf
+│
+├── assignment5-alignment/       # 对齐
+│   ├── cs336_alignment/         # 待实现的代码
+│   ├── cs336_spring2025_assignment5_alignment.pdf
+│   └── cs336_spring2025_assignment5_supplement_safety_rlhf.pdf  # 可选
+│
+└── spring2025-lectures/         # 课程代码示例
+    ├── lecture_01.py            # Tokenization, Basics
+    ├── lecture_02.py            # Transformer
+    ├── lecture_06.py            # Systems, FlashAttention
+    ├── lecture_08.py            # Distributed Training
+    ├── lecture_10.py            # Inference Optimization
+    ├── lecture_12.py            # Data
+    ├── lecture_13.py            # Scaling Laws
+    ├── lecture_14.py            # Scaling Laws (续)
+    └── lecture_17.py            # Alignment
+</code></pre>
+<hr />
+<h2 id="_17">💡 学习技巧</h2>
+<ol>
+<li>
+<p><strong>先跑通测试</strong>: 每个 assignment 都有 pytest 测试，通过测试验证实现
+   <code>bash
+   cd cs336/assignment1-basics
+   uv run pytest tests/test_model.py -v</code></p>
+</li>
+<li>
+<p><strong>对照 Lectures 代码</strong>: <code>spring2025-lectures/</code> 目录下有详细的示例代码</p>
+</li>
+<li>
+<p><strong>PDF 是关键</strong>: 每个 assignment 的 PDF 文件包含详细的算法说明和数学公式</p>
+</li>
+<li>
+<p><strong>结合 vLLM 源码</strong>: 完成 Assignment 2 后，阅读 vLLM 的 attention 实现会更有收获</p>
+</li>
+<li>
+<p><strong>使用 WSL/Linux</strong>: 某些 Triton 相关功能需要在 Linux 环境运行</p>
+</li>
+</ol>
+<hr />
+<h2 id="_18">📚 参考资源</h2>
+<ul>
+<li><a href="https://stanford-cs336.github.io/spring2025/">Stanford CS336 Course Page</a></li>
+<li><a href="https://arxiv.org/abs/2205.14135">FlashAttention Paper</a></li>
+<li><a href="https://arxiv.org/abs/2203.15556">Chinchilla Scaling Laws</a></li>
+<li><a href="https://github.com/vllm-project/vllm">vLLM GitHub</a></li>
+<li><a href="https://arxiv.org/abs/2501.12948">DeepSeek-R1 (GRPO)</a></li>
+</ul>
+<script>
+  document.addEventListener("DOMContentLoaded", function() {
+    if (typeof renderMathInElement !== 'undefined') {
+      renderMathInElement(document.body, {
+        delimiters: [
+          {left: "$$", right: "$$", display: true},
+          {left: "$", right: "$", display: false}
+        ],
+        throwOnError: false
+      });
+    }
+  });
+</script>
+</body>
+</html>

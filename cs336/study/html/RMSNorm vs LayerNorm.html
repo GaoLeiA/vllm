@@ -1,0 +1,226 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>RMSNorm vs LayerNorm</title>
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700;800;900&family=JetBrains+Mono:wght@400;500;600&family=Noto+Sans+SC:wght@300;400;500;700&display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/KaTeX/0.16.9/katex.min.css">
+  <script defer src="https://cdnjs.cloudflare.com/ajax/libs/KaTeX/0.16.9/katex.min.js"></script>
+  <script defer src="https://cdnjs.cloudflare.com/ajax/libs/KaTeX/0.16.9/contrib/auto-render.min.js" onload="renderMathInElement(document.body);"></script>
+  <style>
+    :root {
+      --bg-primary: #0a0e1a;
+      --bg-secondary: #111827;
+      --bg-card: #1a2236;
+      --bg-code: #0d1117;
+      --border-subtle: rgba(255,255,255,0.06);
+      --border-accent: rgba(99,102,241,0.3);
+      --text-primary: #e2e8f0;
+      --text-secondary: #94a3b8;
+      --text-muted: #64748b;
+      --accent-blue: #3b82f6;
+      --accent-purple: #8b5cf6;
+      --radius: 12px;
+      --radius-sm: 8px;
+    }
+    body {
+      font-family: 'Inter', 'Noto Sans SC', sans-serif;
+      background: var(--bg-primary);
+      color: var(--text-primary);
+      line-height: 1.7;
+      font-size: 16px;
+      padding: 40px;
+      max-width: 900px;
+      margin: 0 auto;
+    }
+    h1, h2, h3, h4, h5 { color: var(--text-primary); margin-top: 1.5em; margin-bottom: 0.5em; }
+    h1 { font-size: 2.2em; border-bottom: 2px solid var(--border-subtle); padding-bottom: 0.3em; }
+    h2 { font-size: 1.8em; border-bottom: 1px solid var(--border-subtle); padding-bottom: 0.3em; }
+    h3 { font-size: 1.4em; }
+    p, ul, ol { margin-bottom: 1em; color: var(--text-secondary); }
+    a { color: var(--accent-blue); text-decoration: none; }
+    a:hover { text-decoration: underline; }
+    code {
+      font-family: 'JetBrains Mono', monospace;
+      font-size: 0.9em;
+      background: rgba(139,92,246,0.1);
+      color: var(--accent-purple);
+      padding: 0.2em 0.4em;
+      border-radius: 4px;
+    }
+    pre {
+      background: var(--bg-code);
+      border: 1px solid var(--border-subtle);
+      border-radius: var(--radius-sm);
+      padding: 1em;
+      overflow-x: auto;
+      margin: 1em 0;
+    }
+    pre code {
+      background: transparent;
+      color: #c9d1d9;
+      padding: 0;
+    }
+    blockquote {
+      border-left: 4px solid var(--accent-purple);
+      padding-left: 1em;
+      margin: 1em 0;
+      color: var(--text-muted);
+      background: rgba(139,92,246,0.05);
+      border-radius: 0 var(--radius-sm) var(--radius-sm) 0;
+      padding: 10px 15px;
+    }
+    table {
+      width: 100%;
+      border-collapse: collapse;
+      margin: 1em 0;
+    }
+    th, td {
+      padding: 10px;
+      border: 1px solid var(--border-subtle);
+      text-align: left;
+    }
+    th { background: var(--bg-card); }
+    img { max-width: 100%; border-radius: var(--radius-sm); }
+    hr { border: 0; border-top: 1px solid var(--border-subtle); margin: 2em 0; }
+  </style>
+</head>
+<body>
+<h3 id="rmsnorm-vs-layernorm">RMSNorm vs LayerNorm</h3>
+<hr />
+<h2 id="_1">先看公式</h2>
+<p><strong>LayerNorm</strong>: $$y = \frac{x - \mu}{\sqrt{\sigma^2 + \epsilon}} \cdot \gamma + \beta$$</p>
+<p>需要计算：</p>
+<ol>
+<li>均值 $\mu = \frac{1}{d}\sum x_i$</li>
+<li>方差 $\sigma^2 = \frac{1}{d}\sum (x_i - \mu)^2$</li>
+<li>归一化</li>
+<li>缩放 $\gamma$ + 偏移 $\beta$（两组可学习参数）</li>
+</ol>
+<p><strong>RMSNorm</strong>: $$y = \frac{x}{\sqrt{\frac{1}{d}\sum x_i^2 + \epsilon}} \cdot \gamma$$</p>
+<p>需要计算：</p>
+<ol>
+<li>均方根 $\text{RMS} = \sqrt{\frac{1}{d}\sum x_i^2}$</li>
+<li>归一化</li>
+<li>只有缩放 $\gamma$（一组可学习参数）</li>
+</ol>
+<hr />
+<h2 id="1">优势 1：更快（计算量少）</h2>
+<table>
+<thead>
+<tr>
+<th style="text-align: left;">操作</th>
+<th style="text-align: center;">LayerNorm</th>
+<th style="text-align: center;">RMSNorm</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td style="text-align: left;">求均值 $\mu$</td>
+<td style="text-align: center;">✅ 需要</td>
+<td style="text-align: center;">❌ 不需要</td>
+</tr>
+<tr>
+<td style="text-align: left;">减去均值 $x - \mu$</td>
+<td style="text-align: center;">✅ 需要</td>
+<td style="text-align: center;">❌ 不需要</td>
+</tr>
+<tr>
+<td style="text-align: left;">求方差 $\sigma^2$</td>
+<td style="text-align: center;">✅ 需要</td>
+<td style="text-align: center;">❌ 不需要</td>
+</tr>
+<tr>
+<td style="text-align: left;">求平方和 $\sum x^2$</td>
+<td style="text-align: center;">❌</td>
+<td style="text-align: center;">✅ 需要</td>
+</tr>
+<tr>
+<td style="text-align: left;">偏置参数 $\beta$</td>
+<td style="text-align: center;">✅ 有</td>
+<td style="text-align: center;">❌ 没有</td>
+</tr>
+<tr>
+<td style="text-align: left;"><strong>Kernel 中的 Reduction 次数</strong></td>
+<td style="text-align: center;"><strong>2 次</strong> (均值+方差)</td>
+<td style="text-align: center;"><strong>1 次</strong> (平方和)</td>
+</tr>
+</tbody>
+</table>
+<p>在 GPU 上，<strong>Reduction 操作</strong>（所有线程协作求和）是最贵的部分。RMSNorm 少了一次 Reduction，实测快 <strong>10-15%</strong>。</p>
+<hr />
+<h2 id="2">优势 2：效果一样好（甚至更好）</h2>
+<p><a href="https://arxiv.org/abs/1910.07467">RMSNorm 原论文 (2019)</a> 的核心发现：</p>
+<blockquote>
+<p>LayerNorm 的成功主要归功于<strong>缩放不变性</strong>（Re-scaling Invariance），而不是<strong>平移不变性</strong>（Re-centering，即减去均值）。</p>
+</blockquote>
+<p>实验证明：</p>
+<ul>
+<li>去掉"减均值"这一步，模型效果几乎不变</li>
+<li>去掉"除以标准差"这一步，模型效果明显下降</li>
+</ul>
+<p>说明<strong>归一化幅度</strong>（让向量长度稳定）才是关键，<strong>去中心化</strong>（减均值）是多余的。</p>
+<hr />
+<h2 id="3">优势 3：参数更少</h2>
+<ul>
+<li>LayerNorm: $\gamma$ + $\beta$（$2d$ 个参数）</li>
+<li>RMSNorm: 只有 $\gamma$（$d$ 个参数）</li>
+</ul>
+<p>对于 LLaMA-70B（$d = 8192$, 80 层, 每层 2 个 Norm）：</p>
+<ul>
+<li>节省参数：$80 \times 2 \times 8192 = 1.3M$ 个参数</li>
+<li>虽然占比很小，但在推理时少一次加法也是优化</li>
+</ul>
+<hr />
+<h2 id="llm-rmsnorm">为什么现代 LLM 全用 RMSNorm？</h2>
+<table>
+<thead>
+<tr>
+<th style="text-align: left;">模型</th>
+<th style="text-align: left;">Norm 类型</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td style="text-align: left;">GPT-2 (2019)</td>
+<td style="text-align: left;">LayerNorm</td>
+</tr>
+<tr>
+<td style="text-align: left;">BERT (2018)</td>
+<td style="text-align: left;">LayerNorm</td>
+</tr>
+<tr>
+<td style="text-align: left;">LLaMA 1/2/3 (2023-2024)</td>
+<td style="text-align: left;"><strong>RMSNorm</strong></td>
+</tr>
+<tr>
+<td style="text-align: left;">Qwen 1/2/3 (2023-2024)</td>
+<td style="text-align: left;"><strong>RMSNorm</strong></td>
+</tr>
+<tr>
+<td style="text-align: left;">Mistral/Mixtral</td>
+<td style="text-align: left;"><strong>RMSNorm</strong></td>
+</tr>
+<tr>
+<td style="text-align: left;">Gemma</td>
+<td style="text-align: left;"><strong>RMSNorm</strong></td>
+</tr>
+</tbody>
+</table>
+<p><strong>一句话总结</strong>：RMSNorm 去掉了 LayerNorm 中不重要的"减均值"操作，保留了核心的"缩放归一化"，<strong>更快、更简单、效果一样好</strong>。在追求效率的 LLM 时代，没有理由用 LayerNorm。</p>
+<script>
+  document.addEventListener("DOMContentLoaded", function() {
+    if (typeof renderMathInElement !== 'undefined') {
+      renderMathInElement(document.body, {
+        delimiters: [
+          {left: "$$", right: "$$", display: true},
+          {left: "$", right: "$", display: false}
+        ],
+        throwOnError: false
+      });
+    }
+  });
+</script>
+</body>
+</html>

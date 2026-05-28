@@ -1,0 +1,249 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>cs336_assignments_overview</title>
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700;800;900&family=JetBrains+Mono:wght@400;500;600&family=Noto+Sans+SC:wght@300;400;500;700&display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/KaTeX/0.16.9/katex.min.css">
+  <script defer src="https://cdnjs.cloudflare.com/ajax/libs/KaTeX/0.16.9/katex.min.js"></script>
+  <script defer src="https://cdnjs.cloudflare.com/ajax/libs/KaTeX/0.16.9/contrib/auto-render.min.js" onload="renderMathInElement(document.body);"></script>
+  <style>
+    :root {
+      --bg-primary: #0a0e1a;
+      --bg-secondary: #111827;
+      --bg-card: #1a2236;
+      --bg-code: #0d1117;
+      --border-subtle: rgba(255,255,255,0.06);
+      --border-accent: rgba(99,102,241,0.3);
+      --text-primary: #e2e8f0;
+      --text-secondary: #94a3b8;
+      --text-muted: #64748b;
+      --accent-blue: #3b82f6;
+      --accent-purple: #8b5cf6;
+      --radius: 12px;
+      --radius-sm: 8px;
+    }
+    body {
+      font-family: 'Inter', 'Noto Sans SC', sans-serif;
+      background: var(--bg-primary);
+      color: var(--text-primary);
+      line-height: 1.7;
+      font-size: 16px;
+      padding: 40px;
+      max-width: 900px;
+      margin: 0 auto;
+    }
+    h1, h2, h3, h4, h5 { color: var(--text-primary); margin-top: 1.5em; margin-bottom: 0.5em; }
+    h1 { font-size: 2.2em; border-bottom: 2px solid var(--border-subtle); padding-bottom: 0.3em; }
+    h2 { font-size: 1.8em; border-bottom: 1px solid var(--border-subtle); padding-bottom: 0.3em; }
+    h3 { font-size: 1.4em; }
+    p, ul, ol { margin-bottom: 1em; color: var(--text-secondary); }
+    a { color: var(--accent-blue); text-decoration: none; }
+    a:hover { text-decoration: underline; }
+    code {
+      font-family: 'JetBrains Mono', monospace;
+      font-size: 0.9em;
+      background: rgba(139,92,246,0.1);
+      color: var(--accent-purple);
+      padding: 0.2em 0.4em;
+      border-radius: 4px;
+    }
+    pre {
+      background: var(--bg-code);
+      border: 1px solid var(--border-subtle);
+      border-radius: var(--radius-sm);
+      padding: 1em;
+      overflow-x: auto;
+      margin: 1em 0;
+    }
+    pre code {
+      background: transparent;
+      color: #c9d1d9;
+      padding: 0;
+    }
+    blockquote {
+      border-left: 4px solid var(--accent-purple);
+      padding-left: 1em;
+      margin: 1em 0;
+      color: var(--text-muted);
+      background: rgba(139,92,246,0.05);
+      border-radius: 0 var(--radius-sm) var(--radius-sm) 0;
+      padding: 10px 15px;
+    }
+    table {
+      width: 100%;
+      border-collapse: collapse;
+      margin: 1em 0;
+    }
+    th, td {
+      padding: 10px;
+      border: 1px solid var(--border-subtle);
+      text-align: left;
+    }
+    th { background: var(--bg-card); }
+    img { max-width: 100%; border-radius: var(--radius-sm); }
+    hr { border: 0; border-top: 1px solid var(--border-subtle); margin: 2em 0; }
+  </style>
+</head>
+<body>
+<h1 id="cs336-assignments-overview">CS336 Assignments Overview</h1>
+<p>这份文档归纳了 CS336 课程五个 Assignment 的核心内容、技术要点和学习目标，帮助您快速把握课程脉络。</p>
+<hr />
+<h2 id="1-assignment-1-basics">1. Assignment 1: Basics (基础架构)</h2>
+<blockquote>
+<p><strong>目标</strong>: 从零构建一个完整的 Transformer 语言模型，理解每一个组件的数学原理和代码实现。</p>
+</blockquote>
+<h3 id="_1">🔑 核心任务</h3>
+<ol>
+<li><strong>Tokenizer (BPE)</strong>: 实现 Byte-Pair Encoding 分词器，包括训练（从语料学习合并规则）和推理（编码/解码）。</li>
+<li><strong>Attention Mechanism</strong>:<ul>
+<li>实现朴素的 Scaled Dot-Product Attention。</li>
+<li>实现 Multi-Head Attention (MHA)。</li>
+<li>实现 <strong>RoPE (Rotary Positional Embedding)</strong>，理解旋转位置编码的数学原理。</li>
+</ul>
+</li>
+<li><strong>Transformer 组件</strong>:<ul>
+<li><strong>RMSNorm</strong>: 实现 Root Mean Square Normalization（比 LayerNorm 更高效）。</li>
+<li><strong>SwiGLU</strong>: 实现带有 SiLU 激活函数的门控前馈网络（LLaMA/Qwen 的标配）。</li>
+</ul>
+</li>
+<li><strong>完整模型</strong>: 组装 <code>BasicsTransformerLM</code>，包括 Embedding, Transformer Block, LM Head。</li>
+<li><strong>训练循环</strong>: 实现 Cross Entropy Loss, AdamW 优化器, Cosine Learning Rate Schedule, Gradient Clipping。</li>
+</ol>
+<h3 id="_2">💡 技术要点</h3>
+<ul>
+<li><strong>数值稳定性</strong>: Softmax 和 Cross Entropy 的实现需要使用 LogSumExp trick 防止溢出。</li>
+<li><strong>RoPE</strong>: 将位置信息编码为复数旋转，使得模型能自然地处理相对位置。</li>
+<li><strong>BPE</strong>: 通过迭代合并最频繁的字节对来构建词表，平衡词表大小和序列长度。</li>
+</ul>
+<hr />
+<h2 id="2-assignment-2-systems">2. Assignment 2: Systems (系统优化)</h2>
+<blockquote>
+<p><strong>目标</strong>: 深入理解 LLM 的系统级优化，包括单卡计算效率（FlashAttention）和多卡分布式训练（DDP, ZeRO）。</p>
+</blockquote>
+<h3 id="_3">🔑 核心任务</h3>
+<ol>
+<li><strong>FlashAttention</strong>:<ul>
+<li><strong>PyTorch 版</strong>: 用 PyTorch 原语实现，理解算法逻辑。</li>
+<li><strong>Triton 版</strong>: 用 Triton 编写 GPU Kernel，手动管理 SRAM 和 HBM 之间的数据搬运。</li>
+<li><strong>核心思想</strong>: Tiling (分块) + Online Softmax (在线归一化)，减少 HBM 访问次数。</li>
+</ul>
+</li>
+<li><strong>Distributed Data Parallel (DDP)</strong>:<ul>
+<li>实现多卡梯度同步。</li>
+<li><strong>Bucketing</strong>: 将多个参数的梯度打包成桶（Bucket）进行 AllReduce，以重叠计算和通信（Overlap）。</li>
+</ul>
+</li>
+<li><strong>Sharded Optimizer (ZeRO-1)</strong>:<ul>
+<li>将优化器状态（Momentum, Variance）切分到不同 GPU 上，减少单卡显存占用。</li>
+</ul>
+</li>
+</ol>
+<h3 id="_4">💡 技术要点</h3>
+<ul>
+<li><strong>IO-Awareness</strong>: 现代 GPU 的瓶颈往往在显存带宽（HBM）而非计算（Tensor Cores）。FlashAttention 通过减少 HBM 读写实现加速。</li>
+<li><strong>Communication-Computation Overlap</strong>: 在反向传播计算梯度的同时，异步发送已经计算好的梯度进行同步。</li>
+<li><strong>Memory Optimization</strong>: ZeRO 系列通过切分状态，使得显存占用与 GPU 数量成反比。</li>
+</ul>
+<hr />
+<h2 id="3-assignment-3-scaling">3. Assignment 3: Scaling (扩展定律)</h2>
+<blockquote>
+<p><strong>目标</strong>: 理解 Scaling Laws（扩展定律），学会如何在训练前预测模型性能，并根据算力预算进行最优分配。</p>
+</blockquote>
+<h3 id="_5">🔑 核心任务</h3>
+<ol>
+<li><strong>FLOPs 计算</strong>: 精确计算 Transformer模型在训练和推理时的浮点运算量。</li>
+<li><strong>Scaling Laws 拟合</strong>:<ul>
+<li>使用实验数据（Loss vs 参数量 N vs 数据量 D）拟合 Chinchilla Scaling Law 公式。</li>
+<li>公式形式：$L(N, D) = E + \frac{A}{N^\alpha} + \frac{B}{D^\beta}$。</li>
+</ul>
+</li>
+<li><strong>IsoFLOP 分析</strong>:<ul>
+<li>绘制固定 FLOPs 下的 Loss 曲线，找到最优的 (模型大小, 数据量) 组合。</li>
+</ul>
+</li>
+<li><strong>算力分配</strong>: 给定计算预算（如 $10^{24}$ FLOPs），决定应该训练多大的模型以及用多少数据。</li>
+</ol>
+<h3 id="_6">💡 技术要点</h3>
+<ul>
+<li><strong>Chinchilla Optimal</strong>: 计算预算增加时，模型参数量 ($N$) 和数据量 ($D$) 应该等比例增加（各占一半）。</li>
+<li><strong>Compute-Bound</strong>: 大模型训练通常是计算受限的。</li>
+<li><strong>Over-training</strong>: 在推理成本极其敏感的场景（如 LLaMA 3），可能会训练比 Chinchilla 最优小得多的模型，但用更多的数据（Inference-optimal）。</li>
+</ul>
+<hr />
+<h2 id="4-assignment-4-data">4. Assignment 4: Data (数据处理)</h2>
+<blockquote>
+<p><strong>目标</strong>: 构建从原始网页到高质量预训练语料的完整处理 Pipeline。</p>
+</blockquote>
+<h3 id="_7">🔑 核心任务</h3>
+<ol>
+<li><strong>文本提取</strong>: 从原始 HTML 中提取干净的文本内容。</li>
+<li><strong>PII 脱敏</strong>: 使用正则表达式识别并屏蔽个人隐私信息（邮箱、电话、IP）。</li>
+<li><strong>质量过滤</strong>:<ul>
+<li><strong>Gopher 规则</strong>: 基于文本长度、单词长度、符号比例等启发式规则过滤低质量文本。</li>
+<li><strong>分类器</strong>: 训练/使用模型识别有害内容（Toxicity, NSFW）。</li>
+</ul>
+</li>
+<li><strong>去重 (Deduplication)</strong>:<ul>
+<li><strong>Exact Dedup</strong>: 精确行级去重。</li>
+<li><strong>Fuzzy Dedup (MinHash)</strong>: 使用 MinHash + LSH (Locality Sensitive Hashing) 识别近似重复的文档（如转载文章）。</li>
+</ul>
+</li>
+</ol>
+<h3 id="_8">💡 技术要点</h3>
+<ul>
+<li><strong>Data Quality is King</strong>: 数据质量对模型性能的影响往往大于模型架构的改进。</li>
+<li><strong>MinHash + LSH</strong>: 大规模数据去重的标准算法，能在 $O(1)$ 时间内找到相似文档。</li>
+<li><strong>Safety</strong>: 在预训练阶段就过滤掉有害内容，比后期对齐更有效。</li>
+</ul>
+<hr />
+<h2 id="5-assignment-5-alignment">5. Assignment 5: Alignment (对齐)</h2>
+<blockquote>
+<p><strong>目标</strong>: 使用 SFT 和 RLHF (GRPO/DPO) 技术将预训练模型对齐到人类意图。</p>
+</blockquote>
+<h3 id="_9">🔑 核心任务</h3>
+<ol>
+<li><strong>SFT (Supervised Fine-Tuning)</strong>:<ul>
+<li>构建 Instruction Tuning 数据集。</li>
+<li>实现带 Mask 的 Loss（只计算 Response 部分的 Loss）。</li>
+</ul>
+</li>
+<li><strong>GRPO (Group Relative Policy Optimization)</strong>:<ul>
+<li>复现 DeepSeek-R1 的核心算法。</li>
+<li>为每个 Prompt 生成一组回复 (Group)。</li>
+<li>使用组内相对优势 (Group Relative Advantage) 作为训练信号，无需训练额外的 Critic 模型。</li>
+</ul>
+</li>
+<li><strong>DPO (Direct Preference Optimization)</strong>:<ul>
+<li>实现 DPO Loss，直接使用偏好数据对 $(x, y_w, y_l)$ 优化策略，无需 Reward Model。</li>
+</ul>
+</li>
+<li><strong>评估</strong>:<ul>
+<li>实现 MMLU（知识能力）和 GSM8K（数学推理能力）的自动化评估。</li>
+</ul>
+</li>
+</ol>
+<h3 id="_10">💡 技术要点</h3>
+<ul>
+<li><strong>SFT vs RLHF</strong>: SFT 学习格式和基础知识，RLHF (GRPO/DPO) 学习偏好和推理逻辑。</li>
+<li><strong>GRPO</strong>: 相比 PPO 更简单高效，不需要值函数网络，适合推理任务（DeepSeek-R1）。</li>
+<li><strong>DPO</strong>: 数学上等价于 RLHF，但通过转化为分类问题避免了复杂的强化学习训练过程。</li>
+</ul>
+<hr />
+<p>这份概览涵盖了从模型定义、系统优化、Scaling分析、数据处理到后训练对齐的全过程，是理解 LLM 全栈技术的绝佳路线图。</p>
+<script>
+  document.addEventListener("DOMContentLoaded", function() {
+    if (typeof renderMathInElement !== 'undefined') {
+      renderMathInElement(document.body, {
+        delimiters: [
+          {left: "$$", right: "$$", display: true},
+          {left: "$", right: "$", display: false}
+        ],
+        throwOnError: false
+      });
+    }
+  });
+</script>
+</body>
+</html>

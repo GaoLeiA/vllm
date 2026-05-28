@@ -1,0 +1,251 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>cs336_assignment2_flash_attention_details</title>
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700;800;900&family=JetBrains+Mono:wght@400;500;600&family=Noto+Sans+SC:wght@300;400;500;700&display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/KaTeX/0.16.9/katex.min.css">
+  <script defer src="https://cdnjs.cloudflare.com/ajax/libs/KaTeX/0.16.9/katex.min.js"></script>
+  <script defer src="https://cdnjs.cloudflare.com/ajax/libs/KaTeX/0.16.9/contrib/auto-render.min.js" onload="renderMathInElement(document.body);"></script>
+  <style>
+    :root {
+      --bg-primary: #0a0e1a;
+      --bg-secondary: #111827;
+      --bg-card: #1a2236;
+      --bg-code: #0d1117;
+      --border-subtle: rgba(255,255,255,0.06);
+      --border-accent: rgba(99,102,241,0.3);
+      --text-primary: #e2e8f0;
+      --text-secondary: #94a3b8;
+      --text-muted: #64748b;
+      --accent-blue: #3b82f6;
+      --accent-purple: #8b5cf6;
+      --radius: 12px;
+      --radius-sm: 8px;
+    }
+    body {
+      font-family: 'Inter', 'Noto Sans SC', sans-serif;
+      background: var(--bg-primary);
+      color: var(--text-primary);
+      line-height: 1.7;
+      font-size: 16px;
+      padding: 40px;
+      max-width: 900px;
+      margin: 0 auto;
+    }
+    h1, h2, h3, h4, h5 { color: var(--text-primary); margin-top: 1.5em; margin-bottom: 0.5em; }
+    h1 { font-size: 2.2em; border-bottom: 2px solid var(--border-subtle); padding-bottom: 0.3em; }
+    h2 { font-size: 1.8em; border-bottom: 1px solid var(--border-subtle); padding-bottom: 0.3em; }
+    h3 { font-size: 1.4em; }
+    p, ul, ol { margin-bottom: 1em; color: var(--text-secondary); }
+    a { color: var(--accent-blue); text-decoration: none; }
+    a:hover { text-decoration: underline; }
+    code {
+      font-family: 'JetBrains Mono', monospace;
+      font-size: 0.9em;
+      background: rgba(139,92,246,0.1);
+      color: var(--accent-purple);
+      padding: 0.2em 0.4em;
+      border-radius: 4px;
+    }
+    pre {
+      background: var(--bg-code);
+      border: 1px solid var(--border-subtle);
+      border-radius: var(--radius-sm);
+      padding: 1em;
+      overflow-x: auto;
+      margin: 1em 0;
+    }
+    pre code {
+      background: transparent;
+      color: #c9d1d9;
+      padding: 0;
+    }
+    blockquote {
+      border-left: 4px solid var(--accent-purple);
+      padding-left: 1em;
+      margin: 1em 0;
+      color: var(--text-muted);
+      background: rgba(139,92,246,0.05);
+      border-radius: 0 var(--radius-sm) var(--radius-sm) 0;
+      padding: 10px 15px;
+    }
+    table {
+      width: 100%;
+      border-collapse: collapse;
+      margin: 1em 0;
+    }
+    th, td {
+      padding: 10px;
+      border: 1px solid var(--border-subtle);
+      text-align: left;
+    }
+    th { background: var(--bg-card); }
+    img { max-width: 100%; border-radius: var(--radius-sm); }
+    hr { border: 0; border-top: 1px solid var(--border-subtle); margin: 2em 0; }
+  </style>
+</head>
+<body>
+<h1 id="cs336-assignment-2-flashattention">CS336 Assignment 2: FlashAttention 详解</h1>
+<blockquote>
+<p><strong>核心思想</strong>: 通过 <strong>Tiling (分块)</strong>、<strong>Recomputation (重计算)</strong> 和 <strong>Kernel Fusion (算子融合)</strong>，减少 GPU 显存占用并极大提升推理速度。</p>
+</blockquote>
+<hr />
+<h2 id="1-flashattention">🚀 1. 为什么需要 FlashAttention?</h2>
+<p>标准 Attention 算法（Scaled Dot-Product Attention）存在两大瓶颈：</p>
+<h3 id="11-memory-footprint-on2">1.1 显存占用 (Memory Footprint) - $O(N^2)$</h3>
+<p>对于长度为 $N$ 的序列，需要存储 $N \times N$ 的中间注意力分数矩阵 $S$ 和注意力概率矩阵 $P$。
+-   如果 $N=1K$，矩阵大小约 4MB (FP32)。
+-   如果 $N=128K$ (如 Claude 3)，矩阵大小约 <strong>64GB</strong>！
+-   显存瞬间爆炸，根本无法训练或推理长文本。</p>
+<h3 id="12-memory-bandwidth-hbm-vs-sram">1.2 内存带宽 (Memory Bandwidth) - HBM vs SRAM</h3>
+<p>GPU 内存分两级：
+-   <strong>HBM (High Bandwidth Memory)</strong>: 容量大 (80GB)，速度慢 (2TB/s)。
+-   <strong>SRAM (Shared Memory)</strong>: 容量小 (100KB/SM)，速度极快 (19TB/s)。</p>
+<p>标准 Attention 需要反复读写 HBM：
+1.  读 $Q, K^T$ 从 HBM $\to$ SRAM，计算 $S=QK^T$，写 $S$ 回 HBM。
+2.  读 $S$ 从 HBM $\to$ SRAM，计算 $P=\text{Softmax}(S)$，写 $P$ 回 HBM。
+3.  读 $P, V$ 从 HBM $\to$ SRAM，计算 $O=PV$，写 $O$ 回 HBM。</p>
+<p><strong>FlashAttention 的创新</strong>:
+<strong>直接在 SRAM 中完成所有计算</strong>，完全不把中间矩阵 $S$ 和 $P$ 写回 HBM！</p>
+<hr />
+<h2 id="2-online-softmax">🔥 2. 核心算法：Online Softmax</h2>
+<p>要在分块计算中正确计算 Softmax，必须使用 <strong>Online Softmax</strong> 技巧。因为 Softmax 需要全局最大值和全局分母，而分块计算时还没看到后面的块。</p>
+<h3 id="21-softmax">2.1 传统 Softmax</h3>
+<p>$$ m(x) = \max_i x_i $$
+$$ f(x) = \left[ e^{x_1 - m(x)}, \dots, e^{x_N - m(x)} \right] $$
+$$ \ell(x) = \sum_i f(x)_i $$
+$$ \text{Softmax}(x) = \frac{f(x)}{\ell(x)} $$
+需要遍历所有 $x_i$ 两次（一次求 max，一次求 sum）。</p>
+<h3 id="22-online-softmax">2.2 Online Softmax 更新公式</h3>
+<p>我们可以维护两个运行中的统计量：
+-   $m_{running}$: 当前遇到的局部最大值。
+-   $\ell_{running}$: 当前的局部归一化因子（分母）。</p>
+<p>当处理新的一块数据 $x_{block}$ (长度 $B$) 时：
+1.  计算当前块的局部最大值 $m_{block} = \max(x_{block})$。
+2.  计算当前块的局部指数和 $\ell_{block} = \sum e^{x_{block} - m_{block}}$。
+3.  更新 <strong>全局最大值</strong>:
+    $$ m_{new} = \max(m_{running}, m_{block}) $$
+4.  更新 <strong>全局归一化因子</strong>:
+    $$ \ell_{new} = \ell_{running} \cdot e^{m_{running} - m_{new}} + \ell_{block} \cdot e^{m_{block} - m_{new}} $$
+    <em>(注意：原本的 $\ell_{running}$ 是基于旧的 $m_{running}$ 归一化的，现在要统一缩放到 $m_{new}$ 下)</em></p>
+<hr />
+<h2 id="3-flashattention-tiling">🧩 3. FlashAttention Tiling 算法流程</h2>
+<p>我们把 $Q, K, V$ 切分成块：$Q$ 分为 $T_r$ 块，$K, V$ 分为 $T_c$ 块。每块大小为 $B_r \times d$ 和 $B_c \times d$。</p>
+<h3 id="loop-over-query-blocks-q_i">外层循环 (Loop over Query Blocks $Q_i$)</h3>
+<p>加载 $Q_i$ 从 HBM 到 SRAM。
+初始化输出 $O_i = 0$，统计量 $\ell_i = 0, m_i = -\infty$。</p>
+<h3 id="loop-over-keyvalue-blocks-k_j-v_j">内层循环 (Loop over Key/Value Blocks $K_j, V_j$)</h3>
+<ol>
+<li>加载 $K_j, V_j$ 从 HBM 到 SRAM。</li>
+<li><strong>计算分数</strong>: $S_{ij} = Q_i K_j^T$ (在 SRAM 上计算)。</li>
+<li><strong>更新统计量</strong>:<ul>
+<li>$m_{ij} = \text{rowmax}(S_{ij})$</li>
+<li>$P_{ij} = \exp(S_{ij} - m_{ij})$  <em>(未归一化的概率)</em></li>
+<li>$\ell_{ij} = \text{rowsum}(P_{ij})$</li>
+</ul>
+</li>
+<li><strong>更新全局最大值</strong>:<ul>
+<li>$m_{new} = \max(m_i, m_{ij})$</li>
+<li>$\ell_{new} = \ell_i \cdot e^{m_i - m_{new}} + \ell_{ij} \cdot e^{m_{ij} - m_{new}}$</li>
+</ul>
+</li>
+<li><strong>更新输出 $O_i$</strong>:<ul>
+<li>把旧的 $O_i$ 重新缩放 (rescale) 到新的最大值下：
+    $$ O_i \leftarrow O_i \cdot \frac{\ell_i \cdot e^{m_i - m_{new}}}{\ell_{new}} + \frac{P_{ij} V_j \cdot e^{m_{ij} - m_{new}}}{\ell_{new}} $$</li>
+</ul>
+</li>
+<li>更新指针: $\ell_i \leftarrow \ell_{new}, m_i \leftarrow m_{new}$。</li>
+</ol>
+<h3 id="_1">结束循环</h3>
+<p>写回 $O_i$ 到 HBM。</p>
+<hr />
+<h2 id="4-triton">💻 4. 代码实现 (Triton 伪代码)</h2>
+<p>这就是 <code>get_flashattention_autograd_function_triton</code> 需要实现的内核逻辑。</p>
+<pre><code class="language-python">import triton
+import triton.language as tl
+
+@triton.jit
+def _flash_attn_fwd_kernel(
+    Q, K, V, Out,  # 指针
+    stride_qm, stride_kn, ...  # 步长
+    BLOCK_M: tl.constexpr, BLOCK_N: tl.constexpr, ...
+):
+    # 1. 指针初始化 (Block Pointers)
+    # ... (省略指针算术)
+
+    # 2. 加载 Q 到 SRAM
+    q = tl.load(q_ptrs)
+
+    # 3. 初始化累加器
+    m_i = tl.zeros([BLOCK_M], dtype=tl.float32) - float('inf')
+    l_i = tl.zeros([BLOCK_M], dtype=tl.float32)
+    acc = tl.zeros([BLOCK_M, BLOCK_DHEAD], dtype=tl.float32)
+
+    # 4. 循环遍历 K, V 块
+    for start_n in range(0, N_CTX, BLOCK_N):
+        k = tl.load(k_ptrs)
+        v = tl.load(v_ptrs)
+
+        # 计算 QK^T
+        qk = tl.zeros([BLOCK_M, BLOCK_N], dtype=tl.float32)
+        qk += tl.dot(q, k)
+
+        # Online Softmax 更新
+        m_ij = tl.max(qk, 1)        # 局部最大值
+        p = tl.exp(qk - m_ij[:, None])
+        l_ij = tl.sum(p, 1)         # 局部 sum
+
+        # 更新全局统计量
+        m_new = tl.maximum(m_i, m_ij)
+        alpha = tl.exp(m_i - m_new)
+        beta = tl.exp(m_ij - m_new)
+
+        l_new = alpha * l_i + beta * l_ij
+
+        # 更新输出 acc (重新缩放旧的部分 + 加上新的部分)
+        # acc = acc * alpha * (l_i / l_new) + (p @ v) * beta * (1 / l_new)
+        # 为了数值稳定通常合并缩放因子
+        p_scale = beta / l_new
+        acc_scale = l_i / l_new * alpha
+
+        acc = acc * acc_scale[:, None] + tl.dot(p.to(tl.float16), v) * p_scale[:, None]
+
+        # 更新状态
+        l_i = l_new
+        m_i = m_new
+
+        # 移动 K, V 指针
+        k_ptrs += BLOCK_N * stride_kn
+        v_ptrs += BLOCK_N * stride_vn
+
+    # 5. 写回 HBM
+    tl.store(out_ptrs, acc)
+</code></pre>
+<hr />
+<h2 id="5-vllm-pagedattention">🔗 5. 与 vLLM PagedAttention 的联系</h2>
+<p><strong>PagedAttention</strong> 是 FlashAttention 在内存管理上的延伸：</p>
+<ul>
+<li><strong>FlashAttention</strong>: 假设 $K, V$ 存在连续的内存块中。</li>
+<li><strong>PagedAttention</strong>: 允许 $K, V$ 被切分成固定大小的 Page (如 16 tokens)，存储在非连续的物理内存中。</li>
+</ul>
+<p><strong>计算逻辑是完全一样的</strong>！
+-   FlashAttention 的内层循环是 <code>k_ptrs += stride</code> (线性移动)。
+-   PagedAttention 的内层循环是 <code>block_idx = page_table[batch_idx, logical_block_idx]</code> (查表获取物理地址)。</p>
+<p>理解并实现了 Assignment 2 的 FlashAttention，您就完全具备了理解 vLLM 内核 (<code>vllm/attention/ops/triton/</code>) 的能力。</p>
+<script>
+  document.addEventListener("DOMContentLoaded", function() {
+    if (typeof renderMathInElement !== 'undefined') {
+      renderMathInElement(document.body, {
+        delimiters: [
+          {left: "$$", right: "$$", display: true},
+          {left: "$", right: "$", display: false}
+        ],
+        throwOnError: false
+      });
+    }
+  });
+</script>
+</body>
+</html>

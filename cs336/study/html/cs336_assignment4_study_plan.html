@@ -1,0 +1,456 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>cs336_assignment4_study_plan</title>
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700;800;900&family=JetBrains+Mono:wght@400;500;600&family=Noto+Sans+SC:wght@300;400;500;700&display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/KaTeX/0.16.9/katex.min.css">
+  <script defer src="https://cdnjs.cloudflare.com/ajax/libs/KaTeX/0.16.9/katex.min.js"></script>
+  <script defer src="https://cdnjs.cloudflare.com/ajax/libs/KaTeX/0.16.9/contrib/auto-render.min.js" onload="renderMathInElement(document.body);"></script>
+  <style>
+    :root {
+      --bg-primary: #0a0e1a;
+      --bg-secondary: #111827;
+      --bg-card: #1a2236;
+      --bg-code: #0d1117;
+      --border-subtle: rgba(255,255,255,0.06);
+      --border-accent: rgba(99,102,241,0.3);
+      --text-primary: #e2e8f0;
+      --text-secondary: #94a3b8;
+      --text-muted: #64748b;
+      --accent-blue: #3b82f6;
+      --accent-purple: #8b5cf6;
+      --radius: 12px;
+      --radius-sm: 8px;
+    }
+    body {
+      font-family: 'Inter', 'Noto Sans SC', sans-serif;
+      background: var(--bg-primary);
+      color: var(--text-primary);
+      line-height: 1.7;
+      font-size: 16px;
+      padding: 40px;
+      max-width: 900px;
+      margin: 0 auto;
+    }
+    h1, h2, h3, h4, h5 { color: var(--text-primary); margin-top: 1.5em; margin-bottom: 0.5em; }
+    h1 { font-size: 2.2em; border-bottom: 2px solid var(--border-subtle); padding-bottom: 0.3em; }
+    h2 { font-size: 1.8em; border-bottom: 1px solid var(--border-subtle); padding-bottom: 0.3em; }
+    h3 { font-size: 1.4em; }
+    p, ul, ol { margin-bottom: 1em; color: var(--text-secondary); }
+    a { color: var(--accent-blue); text-decoration: none; }
+    a:hover { text-decoration: underline; }
+    code {
+      font-family: 'JetBrains Mono', monospace;
+      font-size: 0.9em;
+      background: rgba(139,92,246,0.1);
+      color: var(--accent-purple);
+      padding: 0.2em 0.4em;
+      border-radius: 4px;
+    }
+    pre {
+      background: var(--bg-code);
+      border: 1px solid var(--border-subtle);
+      border-radius: var(--radius-sm);
+      padding: 1em;
+      overflow-x: auto;
+      margin: 1em 0;
+    }
+    pre code {
+      background: transparent;
+      color: #c9d1d9;
+      padding: 0;
+    }
+    blockquote {
+      border-left: 4px solid var(--accent-purple);
+      padding-left: 1em;
+      margin: 1em 0;
+      color: var(--text-muted);
+      background: rgba(139,92,246,0.05);
+      border-radius: 0 var(--radius-sm) var(--radius-sm) 0;
+      padding: 10px 15px;
+    }
+    table {
+      width: 100%;
+      border-collapse: collapse;
+      margin: 1em 0;
+    }
+    th, td {
+      padding: 10px;
+      border: 1px solid var(--border-subtle);
+      text-align: left;
+    }
+    th { background: var(--bg-card); }
+    img { max-width: 100%; border-radius: var(--radius-sm); }
+    hr { border: 0; border-top: 1px solid var(--border-subtle); margin: 2em 0; }
+  </style>
+</head>
+<body>
+<h1 id="cs336-assignment-4-data-">CS336 Assignment 4: Data - 学习计划</h1>
+<blockquote>
+<p><strong>目标</strong>: 理解 LLM 训练数据的处理流程 —— 从原始网页到干净的训练语料</p>
+</blockquote>
+<hr />
+<h2 id="assignment-4">📋 Assignment 4 任务概览</h2>
+<table>
+<thead>
+<tr>
+<th>模块</th>
+<th>任务描述</th>
+<th>难度</th>
+<th>代码接口</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><strong>HTML 文本提取</strong></td>
+<td>从 HTML 字节中提取干净文本</td>
+<td>⭐⭐</td>
+<td><code>run_extract_text_from_html_bytes()</code></td>
+</tr>
+<tr>
+<td><strong>语言识别</strong></td>
+<td>识别文本语言</td>
+<td>⭐</td>
+<td><code>run_identify_language()</code></td>
+</tr>
+<tr>
+<td><strong>PII 脱敏</strong></td>
+<td>屏蔽邮箱、电话号码、IP 地址</td>
+<td>⭐⭐</td>
+<td><code>run_mask_emails/phones/ips()</code></td>
+</tr>
+<tr>
+<td><strong>NSFW 分类</strong></td>
+<td>检测不安全内容</td>
+<td>⭐⭐</td>
+<td><code>run_classify_nsfw()</code></td>
+</tr>
+<tr>
+<td><strong>有害言论分类</strong></td>
+<td>检测有害/仇恨言论</td>
+<td>⭐⭐</td>
+<td><code>run_classify_toxic_speech()</code></td>
+</tr>
+<tr>
+<td><strong>质量分类</strong></td>
+<td>评估文本质量</td>
+<td>⭐⭐</td>
+<td><code>run_classify_quality()</code></td>
+</tr>
+<tr>
+<td><strong>Gopher 质量过滤</strong></td>
+<td>基于规则的质量过滤</td>
+<td>⭐⭐⭐</td>
+<td><code>run_gopher_quality_filter()</code></td>
+</tr>
+<tr>
+<td><strong>精确行去重</strong></td>
+<td>按行精确去重</td>
+<td>⭐⭐</td>
+<td><code>run_exact_line_deduplication()</code></td>
+</tr>
+<tr>
+<td><strong>MinHash 去重</strong></td>
+<td>基于 LSH 的近似去重</td>
+<td>⭐⭐⭐⭐</td>
+<td><code>run_minhash_deduplication()</code></td>
+</tr>
+</tbody>
+</table>
+<hr />
+<h2 id="_1">🎯 核心知识点</h2>
+<h3 id="1-pipeline">1. 数据处理 Pipeline 全景</h3>
+<pre><code>                    LLM 数据处理 Pipeline
+
+  ┌──────────┐    ┌──────────┐    ┌──────────┐    ┌──────────┐
+  │ 原始网页  │ →  │ 文本提取  │ →  │ 语言过滤  │ →  │ 质量过滤  │
+  │ (HTML)   │    │ (Extract)│    │ (LangID) │    │ (Quality)│
+  └──────────┘    └──────────┘    └──────────┘    └──────────┘
+                                                        │
+  ┌──────────┐    ┌──────────┐    ┌──────────┐         │
+  │ 训练数据  │ ←  │  去重    │ ←  │ PII脱敏  │ ←  │ 安全过滤 │
+  │ (Clean)  │    │ (Dedup) │    │ (Mask)   │    │ (Safety)│
+  └──────────┘    └──────────┘    └──────────┘    └──────────┘
+</code></pre>
+<hr />
+<h3 id="2-html">2. HTML 文本提取</h3>
+<pre><code class="language-python"># 从 HTML 中提取干净文本
+# 需要处理: script/style 标签移除, 空白规范化, boilerplate 移除
+# 常用库: trafilatura, jusText, resiliparse
+
+from trafilatura import extract
+text = extract(html_bytes.decode('utf-8'))
+</code></pre>
+<hr />
+<h3 id="3-pii-personally-identifiable-information">3. PII (Personally Identifiable Information) 脱敏</h3>
+<pre><code class="language-python"># 需要用正则表达式识别和替换:
+# 1. 邮箱: user@example.com → |||EMAIL_ADDRESS|||
+# 2. 电话号码: (123) 456-7890 → |||PHONE_NUMBER|||  
+# 3. IP 地址: 192.168.1.1 → |||IP_ADDRESS|||
+
+import re
+
+# 邮箱匹配
+EMAIL_PATTERN = r'[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}'
+
+# 电话号码 (多种格式)
+PHONE_PATTERNS = [
+    r'\(\d{3}\)\s*\d{3}[-.]?\d{4}',
+    r'\d{3}[-.]?\d{3}[-.]?\d{4}',
+    # 更多格式...
+]
+
+# IP 地址
+IP_PATTERN = r'\b\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3}\b'
+</code></pre>
+<hr />
+<h3 id="4">4. 质量过滤</h3>
+<p><strong>Gopher Quality Filter</strong> (DeepMind 的过滤标准):</p>
+<pre><code>Gopher 规则:
+┌────────────────────────────────────────────────────────┐
+│ 1. 文档必须包含 50-100,000 个词                         │
+│ 2. 词的平均长度在 3-10 个字符之间                       │
+│ 3. 90% 以上的行不能以省略号结尾                         │
+│ 4. 至少 80% 的词必须包含至少一个字母字符                 │
+│ 5. &quot;the&quot; 出现次数必须 &gt;= 总词数的某个比例                │
+│ 6. 省略号行比例 &lt; 30%                                   │
+│ 7. 字母数字比例 &gt; 80%                                   │
+│ 8. 不能有超多重复行/段落 (去重指标)                      │
+└────────────────────────────────────────────────────────┘
+</code></pre>
+<hr />
+<h3 id="5">5. 去重算法 ⭐ (最重要、最难的部分)</h3>
+<h4 id="5a">5a. 精确行去重</h4>
+<pre><code class="language-python"># 简单但有效: 对每行计算 hash，去除重复行
+# 空间效率: 只存 hash 而非原始文本
+
+import hashlib
+
+seen_hashes = set()
+for line in document:
+    h = hashlib.sha256(line.encode()).hexdigest()
+    if h not in seen_hashes:
+        seen_hashes.add(h)
+        output.write(line)
+</code></pre>
+<h4 id="5b-minhash-lsh">5b. MinHash LSH 去重 ⭐⭐⭐</h4>
+<p><strong>核心思想</strong>: 用 Locality-Sensitive Hashing 找到近似相似的文档</p>
+<pre><code>MinHash 算法流程:
+┌─────────────────────────────────────────────────────────────┐
+│ 1. Shingling: 将文档分成 n-gram 集合                        │
+│    &quot;hello world&quot; → {&quot;hel&quot;,&quot;ell&quot;,&quot;llo&quot;,&quot;lo &quot;,&quot;o w&quot;,&quot;wor&quot;,...}│
+│                                                             │
+│ 2. MinHash: 用 k 个 hash 函数生成签名                       │
+│    signature = [min(h₁(shingles)), min(h₂(shingles)), ...]  │
+│    长度 k 的签名 ≈ Jaccard 相似度的近似                      │
+│                                                             │
+│ 3. LSH Banding: 将签名分成 b 个 band，每个 band r 个行      │
+│    如果两个文档在任一 band 完全匹配 → 候选对                  │
+│    P(match) ≈ 1 - (1 - s^r)^b                              │
+│    其中 s = Jaccard 相似度                                   │
+│                                                             │
+│ 4. 候选验证: 对候选对计算真实 Jaccard 相似度                  │
+│    如果 &gt; threshold → 标记为重复                             │
+└─────────────────────────────────────────────────────────────┘
+</code></pre>
+<p><strong>LSH 参数调优</strong>:</p>
+<pre><code class="language-python"># num_hashes = num_bands * rows_per_band
+# 例如: 128 hashes = 16 bands × 8 rows
+# 
+# threshold ≈ (1/num_bands)^(1/rows_per_band)
+# 调大 bands → 更高召回 (更多候选对)
+# 调大 rows  → 更高精度 (更少假阳性)
+</code></pre>
+<hr />
+<h2 id="_2">🎯 学习路径</h2>
+<h3 id="phase-1-html-15">Phase 1: HTML 文本提取 + 语言识别 (1.5小时)</h3>
+<pre><code class="language-python"># 推荐库:
+# - trafilatura: 高质量 HTML 文本提取
+# - fasttext: 高速语言识别
+
+# 安装
+# uv add trafilatura fasttext-wheel
+
+# 语言识别
+import fasttext
+model = fasttext.load_model('lid.176.bin')
+predictions = model.predict(text)
+# 返回: (('__label__en',), array([0.95]))
+</code></pre>
+<hr />
+<h3 id="phase-2-pii-15">Phase 2: PII 脱敏 (1.5小时)</h3>
+<p>正则表达式实战 —— 识别和替换敏感信息</p>
+<p><strong>关键挑战</strong>:
+- 电话号码格式多样 (国际格式、带/不带括号...)
+- 需要处理边界情况 (不要误匹配正常数字)
+- 替换时需要记录替换次数</p>
+<hr />
+<h3 id="phase-3-2">Phase 3: 安全与质量分类 (2小时)</h3>
+<pre><code class="language-python"># NSFW 和毒性检测通常使用预训练分类器
+# 例如:
+# - fasttext 分类器 (轻量级)
+# - HuggingFace 上的 toxicity 检测模型
+
+# 质量分类
+# 可以用简单的启发式规则 (Gopher) 或训练分类器
+</code></pre>
+<hr />
+<h3 id="phase-4-15">Phase 4: 精确去重 (1.5小时)</h3>
+<pre><code class="language-python"># 输入: 多个文件，每个文件包含多个文档
+# 输出: 去重后的文件 (去除重复行)
+# 
+# 挑战:
+# - 跨文件去重 (全局 hash set)
+# - 空间效率 (只存 hash)
+# - 处理空行和空白
+</code></pre>
+<hr />
+<h3 id="phase-5-minhash-4">Phase 5: MinHash 去重 ⭐ (4小时)</h3>
+<p>这是 Assignment 4 最核心最难的部分:</p>
+<pre><code class="language-python"># 实现步骤:
+# 1. 文档 → n-gram 集合 (shingling)
+# 2. n-gram 集合 → MinHash 签名
+# 3. 签名 → LSH bands → 候选对
+# 4. 候选对 → 验证 → 去重
+
+def minhash_signature(shingles, num_hashes):
+    &quot;&quot;&quot;计算 MinHash 签名&quot;&quot;&quot;
+    signature = []
+    for i in range(num_hashes):
+        min_hash = float('inf')
+        for shingle in shingles:
+            h = hash_fn(shingle, seed=i)  # 不同 seed 的 hash
+            min_hash = min(min_hash, h)
+        signature.append(min_hash)
+    return signature
+
+def lsh_candidates(signatures, num_bands, rows_per_band):
+    &quot;&quot;&quot;LSH 找候选对&quot;&quot;&quot;
+    buckets = defaultdict(set)
+    for doc_id, sig in enumerate(signatures):
+        for band_idx in range(num_bands):
+            start = band_idx * rows_per_band
+            band = tuple(sig[start:start + rows_per_band])
+            bucket_key = (band_idx, hash(band))
+            buckets[bucket_key].add(doc_id)
+    # 同一个 bucket 的文档是候选对
+    ...
+</code></pre>
+<hr />
+<h2 id="vllm">🔗 与 vLLM 的连接</h2>
+<p>虽然 vLLM 是推理框架，不直接处理数据，但理解数据处理有助于:</p>
+<table>
+<thead>
+<tr>
+<th>数据概念</th>
+<th>vLLM 间接影响</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>数据质量</td>
+<td>模型质量直接影响推理效果</td>
+</tr>
+<tr>
+<td>Tokenizer 兼容性</td>
+<td>vLLM 需要使用正确的 tokenizer</td>
+</tr>
+<tr>
+<td>数据规模</td>
+<td>影响模型大小选择 → 影响 vLLM 资源需求</td>
+</tr>
+<tr>
+<td>安全过滤</td>
+<td>vLLM 输出的安全性取决于训练数据</td>
+</tr>
+</tbody>
+</table>
+<hr />
+<h2 id="_3">📚 配套讲座</h2>
+<ol>
+<li><strong>Lecture 12</strong> — Data basics: web crawling, filtering</li>
+<li><strong>Lecture 13</strong> — Data deduplication, quality assessment</li>
+<li><strong>Lecture 14</strong> — Advanced data techniques</li>
+</ol>
+<hr />
+<h2 id="_4">🧪 测试命令</h2>
+<pre><code class="language-bash">cd D:\projects\vllm\cs336\assignment4-data
+
+# 安装依赖
+uv sync
+
+# 运行所有测试
+uv run pytest tests/ -v
+
+# 单独测试各模块
+uv run pytest tests/test_extract.py -v        # HTML 提取
+uv run pytest tests/test_langid.py -v         # 语言识别
+uv run pytest tests/test_pii.py -v            # PII 脱敏
+uv run pytest tests/test_toxicity.py -v       # 有害内容
+uv run pytest tests/test_quality.py -v        # 质量过滤
+uv run pytest tests/test_deduplication.py -v  # 去重 (MinHash + Exact)
+</code></pre>
+<hr />
+<h2 id="_5">📅 学习时间安排</h2>
+<table>
+<thead>
+<tr>
+<th>阶段</th>
+<th>预计时间</th>
+<th>产出</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>Phase 1: HTML 提取 + 语言识别</td>
+<td>1.5小时</td>
+<td>text extraction, langid</td>
+</tr>
+<tr>
+<td>Phase 2: PII 脱敏</td>
+<td>1.5小时</td>
+<td>email/phone/ip masking</td>
+</tr>
+<tr>
+<td>Phase 3: 安全与质量分类</td>
+<td>2小时</td>
+<td>NSFW, toxic, quality classifiers</td>
+</tr>
+<tr>
+<td>Phase 4: 精确去重</td>
+<td>1.5小时</td>
+<td>exact line dedup</td>
+</tr>
+<tr>
+<td>Phase 5: MinHash 去重</td>
+<td>4小时</td>
+<td>MinHash LSH pipeline</td>
+</tr>
+</tbody>
+</table>
+<p><strong>总计</strong>: ~10.5小时</p>
+<hr />
+<h2 id="_6">✅ 关键学习成果</h2>
+<p>完成 Assignment 4 后，您将理解：
+- 🌐 <strong>数据 Pipeline</strong>: 从原始网页到训练数据的完整流程
+- 🔍 <strong>去重技术</strong>: LSH/MinHash 的原理和实现 (广泛应用于搜索引擎)
+- 🛡️ <strong>数据安全</strong>: PII 脱敏、有害内容过滤
+- 📊 <strong>数据质量</strong>: 如何评估和过滤低质量数据
+- 🏭 <strong>工程实践</strong>: 大规模数据处理的效率考量</p>
+<script>
+  document.addEventListener("DOMContentLoaded", function() {
+    if (typeof renderMathInElement !== 'undefined') {
+      renderMathInElement(document.body, {
+        delimiters: [
+          {left: "$$", right: "$$", display: true},
+          {left: "$", right: "$", display: false}
+        ],
+        throwOnError: false
+      });
+    }
+  });
+</script>
+</body>
+</html>
