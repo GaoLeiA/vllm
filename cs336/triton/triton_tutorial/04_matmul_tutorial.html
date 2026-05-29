@@ -1,0 +1,369 @@
+<h1 id="第四章矩阵乘法-tiling-与-shared-memory">第四章：矩阵乘法 — Tiling 与 Shared Memory</h1>
+<blockquote>
+<p><strong>你将学到什么：</strong> - 理解矩阵乘法的内存瓶颈 - 掌握 Tiling（分块）的核心思想 - 理解 Shared Memory 的作用 - 实现 Triton 矩阵乘法 kernel - 对比 PyTorch 原生和 Triton 实现的性能</p>
+<p><strong>前置知识：</strong> 第三章（行级聚合，Softmax） <strong>预计时间：</strong> 60 分钟 <strong>最终成果：</strong> 一个能处理任意尺寸矩阵的 Triton matmul kernel</p>
+</blockquote>
+<hr />
+<h2 id="矩阵乘法的内存瓶颈">1. 矩阵乘法的内存瓶颈</h2>
+<h3 id="矩阵乘法回顾">1.1 矩阵乘法回顾</h3>
+<pre><code>C = A @ B
+
+A: (M, K)        B: (K, N)        C: (M, N)
+[cᵢⱼ = Σₖ aᵢₖ · bₖⱼ]</code></pre>
+<p>每个 <code>cᵢⱼ</code> 需要 K 次乘法和 K-1 次加法。总共 M×N 个输出元素。</p>
+<h3 id="朴素实现的内存访问">1.2 朴素实现的内存访问</h3>
+<div class="sourceCode" id="cb2"><pre class="sourceCode python"><code class="sourceCode python"><span id="cb2-1"><a href="#cb2-1" aria-hidden="true"></a><span class="co"># 朴素实现: 每个线程算一个 cᵢⱼ</span></span>
+<span id="cb2-2"><a href="#cb2-2" aria-hidden="true"></a><span class="cf">for</span> i <span class="kw">in</span> <span class="bu">range</span>(M):</span>
+<span id="cb2-3"><a href="#cb2-3" aria-hidden="true"></a>    <span class="cf">for</span> j <span class="kw">in</span> <span class="bu">range</span>(N):</span>
+<span id="cb2-4"><a href="#cb2-4" aria-hidden="true"></a>        s <span class="op">=</span> <span class="dv">0</span></span>
+<span id="cb2-5"><a href="#cb2-5" aria-hidden="true"></a>        <span class="cf">for</span> k <span class="kw">in</span> <span class="bu">range</span>(K):</span>
+<span id="cb2-6"><a href="#cb2-6" aria-hidden="true"></a>            s <span class="op">+=</span> A[i, k] <span class="op">*</span> B[k, j]</span>
+<span id="cb2-7"><a href="#cb2-7" aria-hidden="true"></a>        C[i, j] <span class="op">=</span> s</span></code></pre></div>
+<p><strong>内存访问分析：</strong></p>
+<ul>
+<li>每个 <code>cᵢⱼ</code> 需要读 <code>A[i, :]</code> (K 个元素) 和 <code>B[:, j]</code> (K 个元素)</li>
+<li>但 <code>A[i, k]</code> 被 <code>cᵢ₀, cᵢ₁, ..., cᵢₙ₋₁</code> 共 N 次使用</li>
+<li><code>B[k, j]</code> 被 <code>c₀ⱼ, c₁ⱼ, ..., cₘ₋₁ⱼ</code> 共 M 次使用</li>
+</ul>
+<p><strong>总内存访问：</strong> - 读 A: M × K × N 次 ❌（实际只需要 M × K 次） - 读 B: K × N × M 次 ❌（实际只需要 K × N 次） - 写 C: M × N 次 ✅</p>
+<p><strong>问题：</strong> 每个元素被重复读取！这就是我们需要 Tiling 的原因。</p>
+<h3 id="类比做饭">1.3 类比：做饭</h3>
+<blockquote>
+<p>假设你要用 10 种食材做 10 道菜：</p>
+<p><strong>朴素做法：</strong> 每做一道菜就去一次仓库拿食材 → 10 道菜 × 10 次仓库 = 100 趟</p>
+<p><strong>Tiling 做法：</strong> 一次把所有食材搬出来 → 1 趟仓库 + 做 10 道菜</p>
+</blockquote>
+<hr />
+<h2 id="tiling分块的核心思想">2. Tiling（分块）的核心思想</h2>
+<h3 id="基本思路">2.1 基本思路</h3>
+<pre><code>把大矩阵切成小方块，每次只处理一小块:
+
+A: (M, K)          B: (K, N)          C: (M, N)
+┌──────┬──────┐    ┌──────┬──────┐    ┌──────┬──────┐
+│ A₀₀  │ A₀₁  │    │ B₀₀  │ B₀₁  │    │ C₀₀  │ C₀₁  │
+├──────┼──────┤    ├──────┼──────┤    ├──────┼──────┤
+│ A₁₀  │ A₁₁  │    │ B₁₀  │ B₁₁  │    │ C₁₀  │ C₁₁  │
+└──────┴──────┘    └──────┴──────┘    └──────┴──────┘
+
+C₀₀ = A₀₀ @ B₀₀ + A₀₁ @ B₁₀   (按 K 维度累加)</code></pre>
+<p><strong>每个 block_size × block_size 的子矩阵乘法：</strong></p>
+<pre><code>C_tile += A_tile @ B_tile</code></pre>
+<h3 id="内存访问对比">2.2 内存访问对比</h3>
+<table>
+<thead>
+<tr class="header">
+<th>方法</th>
+<th>读 A</th>
+<th>读 B</th>
+<th>写 C</th>
+</tr>
+</thead>
+<tbody>
+<tr class="odd">
+<td>朴素</td>
+<td>M×K×N</td>
+<td>K×N×M</td>
+<td>M×N</td>
+</tr>
+<tr class="even">
+<td><strong>Tiled</strong></td>
+<td>M×K + K×N</td>
+<td>M×K + K×N</td>
+<td>M×N</td>
+</tr>
+</tbody>
+</table>
+<p><strong>Tiling 把读写从 O(M×N×K) 降到 O(M×K + K×N)，减少了 K 倍！</strong></p>
+<hr />
+<h2 id="triton-矩阵乘法实现">3. Triton 矩阵乘法实现</h2>
+<h3 id="grid-配置">3.1 Grid 配置</h3>
+<pre><code>C 矩阵: (M, N)
+BLOCK_M = 64, BLOCK_N = 64
+
+Grid: (M/64, N/64)
+
+每个 block 负责 C 的一个 64×64 子块</code></pre>
+<h3 id="完整实现">3.2 完整实现</h3>
+<div class="sourceCode" id="cb6"><pre class="sourceCode python"><code class="sourceCode python"><span id="cb6-1"><a href="#cb6-1" aria-hidden="true"></a><span class="at">@triton.jit</span></span>
+<span id="cb6-2"><a href="#cb6-2" aria-hidden="true"></a><span class="kw">def</span> matmul_simple_kernel(</span>
+<span id="cb6-3"><a href="#cb6-3" aria-hidden="true"></a>    A, B, C,</span>
+<span id="cb6-4"><a href="#cb6-4" aria-hidden="true"></a>    M, N, K,</span>
+<span id="cb6-5"><a href="#cb6-5" aria-hidden="true"></a>    stride_am, stride_ak,        <span class="co"># A 的 strides</span></span>
+<span id="cb6-6"><a href="#cb6-6" aria-hidden="true"></a>    stride_bk, stride_bn,        <span class="co"># B 的 strides</span></span>
+<span id="cb6-7"><a href="#cb6-7" aria-hidden="true"></a>    stride_cm, stride_cn,        <span class="co"># C 的 strides</span></span>
+<span id="cb6-8"><a href="#cb6-8" aria-hidden="true"></a>    BLOCK_SIZE_M: tl.constexpr,</span>
+<span id="cb6-9"><a href="#cb6-9" aria-hidden="true"></a>    BLOCK_SIZE_N: tl.constexpr,</span>
+<span id="cb6-10"><a href="#cb6-10" aria-hidden="true"></a>    BLOCK_SIZE_K: tl.constexpr,</span>
+<span id="cb6-11"><a href="#cb6-11" aria-hidden="true"></a>):</span>
+<span id="cb6-12"><a href="#cb6-12" aria-hidden="true"></a>    <span class="co"># ---- Step 1: 确定当前 block 负责 C 的哪个子块 ----</span></span>
+<span id="cb6-13"><a href="#cb6-13" aria-hidden="true"></a>    pid_m <span class="op">=</span> tl.program_id(axis<span class="op">=</span><span class="dv">0</span>)   <span class="co"># 行块 ID</span></span>
+<span id="cb6-14"><a href="#cb6-14" aria-hidden="true"></a>    pid_n <span class="op">=</span> tl.program_id(axis<span class="op">=</span><span class="dv">1</span>)   <span class="co"># 列块 ID</span></span>
+<span id="cb6-15"><a href="#cb6-15" aria-hidden="true"></a></span>
+<span id="cb6-16"><a href="#cb6-16" aria-hidden="true"></a>    <span class="co"># ---- Step 2: 生成行/列偏移 ----</span></span>
+<span id="cb6-17"><a href="#cb6-17" aria-hidden="true"></a>    offset_m <span class="op">=</span> pid_m <span class="op">*</span> BLOCK_SIZE_M <span class="op">+</span> tl.arange(<span class="dv">0</span>, BLOCK_SIZE_M)</span>
+<span id="cb6-18"><a href="#cb6-18" aria-hidden="true"></a>    offset_n <span class="op">=</span> pid_n <span class="op">*</span> BLOCK_SIZE_N <span class="op">+</span> tl.arange(<span class="dv">0</span>, BLOCK_SIZE_N)</span>
+<span id="cb6-19"><a href="#cb6-19" aria-hidden="true"></a></span>
+<span id="cb6-20"><a href="#cb6-20" aria-hidden="true"></a>    <span class="co"># ---- Step 3: 创建 mask ----</span></span>
+<span id="cb6-21"><a href="#cb6-21" aria-hidden="true"></a>    mask_m <span class="op">=</span> offset_m <span class="op">&lt;</span> M</span>
+<span id="cb6-22"><a href="#cb6-22" aria-hidden="true"></a>    mask_n <span class="op">=</span> offset_n <span class="op">&lt;</span> N</span>
+<span id="cb6-23"><a href="#cb6-23" aria-hidden="true"></a>    mask <span class="op">=</span> mask_m[:, <span class="va">None</span>] <span class="op">&amp;</span> mask_n[<span class="va">None</span>, :]</span>
+<span id="cb6-24"><a href="#cb6-24" aria-hidden="true"></a></span>
+<span id="cb6-25"><a href="#cb6-25" aria-hidden="true"></a>    <span class="co"># ---- Step 4: 初始化累加器 (float32 避免溢出) ----</span></span>
+<span id="cb6-26"><a href="#cb6-26" aria-hidden="true"></a>    acc <span class="op">=</span> tl.zeros((BLOCK_SIZE_M, BLOCK_SIZE_N), dtype<span class="op">=</span>tl.float32)</span>
+<span id="cb6-27"><a href="#cb6-27" aria-hidden="true"></a></span>
+<span id="cb6-28"><a href="#cb6-28" aria-hidden="true"></a>    <span class="co"># ---- Step 5: 循环遍历 K 维度 ----</span></span>
+<span id="cb6-29"><a href="#cb6-29" aria-hidden="true"></a>    <span class="cf">for</span> k <span class="kw">in</span> <span class="bu">range</span>(<span class="dv">0</span>, K, BLOCK_SIZE_K):</span>
+<span id="cb6-30"><a href="#cb6-30" aria-hidden="true"></a>        offset_k <span class="op">=</span> k <span class="op">+</span> tl.arange(<span class="dv">0</span>, BLOCK_SIZE_K)</span>
+<span id="cb6-31"><a href="#cb6-31" aria-hidden="true"></a>        mask_k <span class="op">=</span> offset_k <span class="op">&lt;</span> K</span>
+<span id="cb6-32"><a href="#cb6-32" aria-hidden="true"></a></span>
+<span id="cb6-33"><a href="#cb6-33" aria-hidden="true"></a>        <span class="co"># 加载 A 的子块 (BLOCK_M, BLOCK_K)</span></span>
+<span id="cb6-34"><a href="#cb6-34" aria-hidden="true"></a>        a_ptrs <span class="op">=</span> A <span class="op">+</span> offset_m[:, <span class="va">None</span>] <span class="op">*</span> stride_am <span class="op">+</span> offset_k[<span class="va">None</span>, :] <span class="op">*</span> stride_ak</span>
+<span id="cb6-35"><a href="#cb6-35" aria-hidden="true"></a>        a <span class="op">=</span> tl.load(a_ptrs, mask<span class="op">=</span>mask_m[:, <span class="va">None</span>] <span class="op">&amp;</span> mask_k[<span class="va">None</span>, :], other<span class="op">=</span><span class="fl">0.0</span>)</span>
+<span id="cb6-36"><a href="#cb6-36" aria-hidden="true"></a></span>
+<span id="cb6-37"><a href="#cb6-37" aria-hidden="true"></a>        <span class="co"># 加载 B 的子块 (BLOCK_K, BLOCK_N)</span></span>
+<span id="cb6-38"><a href="#cb6-38" aria-hidden="true"></a>        b_ptrs <span class="op">=</span> B <span class="op">+</span> offset_k[:, <span class="va">None</span>] <span class="op">*</span> stride_bk <span class="op">+</span> offset_n[<span class="va">None</span>, :] <span class="op">*</span> stride_bn</span>
+<span id="cb6-39"><a href="#cb6-39" aria-hidden="true"></a>        b <span class="op">=</span> tl.load(b_ptrs, mask<span class="op">=</span>mask_k[:, <span class="va">None</span>] <span class="op">&amp;</span> mask_n[<span class="va">None</span>, :], other<span class="op">=</span><span class="fl">0.0</span>)</span>
+<span id="cb6-40"><a href="#cb6-40" aria-hidden="true"></a></span>
+<span id="cb6-41"><a href="#cb6-41" aria-hidden="true"></a>        <span class="co"># 矩阵乘法</span></span>
+<span id="cb6-42"><a href="#cb6-42" aria-hidden="true"></a>        acc <span class="op">+=</span> tl.dot(a, b)</span>
+<span id="cb6-43"><a href="#cb6-43" aria-hidden="true"></a></span>
+<span id="cb6-44"><a href="#cb6-44" aria-hidden="true"></a>    <span class="co"># ---- Step 6: 转回输入类型并写回 ----</span></span>
+<span id="cb6-45"><a href="#cb6-45" aria-hidden="true"></a>    acc <span class="op">=</span> acc.to(C.element_type)</span>
+<span id="cb6-46"><a href="#cb6-46" aria-hidden="true"></a>    c_ptrs <span class="op">=</span> C <span class="op">+</span> offset_m[:, <span class="va">None</span>] <span class="op">*</span> stride_cm <span class="op">+</span> offset_n[<span class="va">None</span>, :] <span class="op">*</span> stride_cn</span>
+<span id="cb6-47"><a href="#cb6-47" aria-hidden="true"></a>    tl.store(c_ptrs, acc, mask<span class="op">=</span>mask)</span></code></pre></div>
+<h3 id="逐段解析">3.3 逐段解析</h3>
+<h4 id="确定负责的子块">3.3.1 确定负责的子块</h4>
+<div class="sourceCode" id="cb7"><pre class="sourceCode python"><code class="sourceCode python"><span id="cb7-1"><a href="#cb7-1" aria-hidden="true"></a>pid_m <span class="op">=</span> tl.program_id(axis<span class="op">=</span><span class="dv">0</span>)</span>
+<span id="cb7-2"><a href="#cb7-2" aria-hidden="true"></a>pid_n <span class="op">=</span> tl.program_id(axis<span class="op">=</span><span class="dv">1</span>)</span>
+<span id="cb7-3"><a href="#cb7-3" aria-hidden="true"></a></span>
+<span id="cb7-4"><a href="#cb7-4" aria-hidden="true"></a>offset_m <span class="op">=</span> pid_m <span class="op">*</span> BLOCK_SIZE_M <span class="op">+</span> tl.arange(<span class="dv">0</span>, BLOCK_SIZE_M)</span>
+<span id="cb7-5"><a href="#cb7-5" aria-hidden="true"></a><span class="co"># 例如 pid_m=2, BLOCK_SIZE_M=64 → [128, 129, ..., 191]</span></span>
+<span id="cb7-6"><a href="#cb7-6" aria-hidden="true"></a></span>
+<span id="cb7-7"><a href="#cb7-7" aria-hidden="true"></a>offset_n <span class="op">=</span> pid_n <span class="op">*</span> BLOCK_SIZE_N <span class="op">+</span> tl.arange(<span class="dv">0</span>, BLOCK_SIZE_N)</span></code></pre></div>
+<h4 id="d-mask">3.3.2 2D Mask</h4>
+<div class="sourceCode" id="cb8"><pre class="sourceCode python"><code class="sourceCode python"><span id="cb8-1"><a href="#cb8-1" aria-hidden="true"></a>mask_m <span class="op">=</span> offset_m <span class="op">&lt;</span> M     <span class="co"># shape: (BLOCK_SIZE_M,)</span></span>
+<span id="cb8-2"><a href="#cb8-2" aria-hidden="true"></a>mask_n <span class="op">=</span> offset_n <span class="op">&lt;</span> N     <span class="co"># shape: (BLOCK_SIZE_N,)</span></span>
+<span id="cb8-3"><a href="#cb8-3" aria-hidden="true"></a>mask <span class="op">=</span> mask_m[:, <span class="va">None</span>] <span class="op">&amp;</span> mask_n[<span class="va">None</span>, :]  <span class="co"># shape: (BLOCK_SIZE_M, BLOCK_SIZE_N)</span></span></code></pre></div>
+<p><strong>为什么是 2D mask？</strong> 因为 C 的子块可能超出边界，需要对每个元素单独判断。</p>
+<h4 id="加载-a-的子块">3.3.3 加载 A 的子块</h4>
+<div class="sourceCode" id="cb9"><pre class="sourceCode python"><code class="sourceCode python"><span id="cb9-1"><a href="#cb9-1" aria-hidden="true"></a>a_ptrs <span class="op">=</span> A <span class="op">+</span> offset_m[:, <span class="va">None</span>] <span class="op">*</span> stride_am <span class="op">+</span> offset_k[<span class="va">None</span>, :] <span class="op">*</span> stride_ak</span></code></pre></div>
+<p>这是 Triton 的<strong>指针算术</strong>：</p>
+<pre><code>A[i, k] 的指针 = A + i * stride_am + k * stride_ak
+
+offset_m[:, None]  → shape (BLOCK_M, 1)  → 行索引
+offset_k[None, :]  → shape (1, BLOCK_K)  → 列索引
+
+相加后 shape (BLOCK_M, BLOCK_K) → 正好是 A 的子块</code></pre>
+<h4 id="tl.dota-b-矩阵乘法">3.3.4 <code>tl.dot(a, b)</code> — 矩阵乘法</h4>
+<div class="sourceCode" id="cb11"><pre class="sourceCode python"><code class="sourceCode python"><span id="cb11-1"><a href="#cb11-1" aria-hidden="true"></a>a: shape (BLOCK_M, BLOCK_K)</span>
+<span id="cb11-2"><a href="#cb11-2" aria-hidden="true"></a>b: shape (BLOCK_K, BLOCK_N)</span>
+<span id="cb11-3"><a href="#cb11-3" aria-hidden="true"></a>tl.dot(a, b) → shape (BLOCK_M, BLOCK_N)</span></code></pre></div>
+<p><strong>注意：</strong> 内部维度 (BLOCK_K) 必须对齐！</p>
+<h4 id="k-维度的循环">3.3.5 K 维度的循环</h4>
+<div class="sourceCode" id="cb12"><pre class="sourceCode python"><code class="sourceCode python"><span id="cb12-1"><a href="#cb12-1" aria-hidden="true"></a><span class="cf">for</span> k <span class="kw">in</span> <span class="bu">range</span>(<span class="dv">0</span>, K, BLOCK_SIZE_K):</span>
+<span id="cb12-2"><a href="#cb12-2" aria-hidden="true"></a>    <span class="co"># 每次加载 A 的一列块和 B 的一行块</span></span>
+<span id="cb12-3"><a href="#cb12-3" aria-hidden="true"></a>    <span class="co"># 做一次 mini matmul: acc += A_col @ B_row</span></span>
+<span id="cb12-4"><a href="#cb12-4" aria-hidden="true"></a>    <span class="co"># ...</span></span></code></pre></div>
+<p>这个循环是 Triton kernel 中<strong>唯一的 Python for 循环</strong>。Triton 编译器会把它优化为 GPU 循环。</p>
+<hr />
+<h2 id="包装函数">4. 包装函数</h2>
+<div class="sourceCode" id="cb13"><pre class="sourceCode python"><code class="sourceCode python"><span id="cb13-1"><a href="#cb13-1" aria-hidden="true"></a><span class="kw">def</span> matmul_simple_wrapper(A, B):</span>
+<span id="cb13-2"><a href="#cb13-2" aria-hidden="true"></a>    M, K <span class="op">=</span> A.shape</span>
+<span id="cb13-3"><a href="#cb13-3" aria-hidden="true"></a>    K2, N <span class="op">=</span> B.shape</span>
+<span id="cb13-4"><a href="#cb13-4" aria-hidden="true"></a>    <span class="cf">assert</span> K <span class="op">==</span> K2</span>
+<span id="cb13-5"><a href="#cb13-5" aria-hidden="true"></a></span>
+<span id="cb13-6"><a href="#cb13-6" aria-hidden="true"></a>    C <span class="op">=</span> torch.empty((M, N), device<span class="op">=</span>A.device, dtype<span class="op">=</span>A.dtype)</span>
+<span id="cb13-7"><a href="#cb13-7" aria-hidden="true"></a></span>
+<span id="cb13-8"><a href="#cb13-8" aria-hidden="true"></a>    <span class="co"># Grid 配置</span></span>
+<span id="cb13-9"><a href="#cb13-9" aria-hidden="true"></a>    BLOCK_M <span class="op">=</span> <span class="dv">64</span></span>
+<span id="cb13-10"><a href="#cb13-10" aria-hidden="true"></a>    BLOCK_N <span class="op">=</span> <span class="dv">64</span></span>
+<span id="cb13-11"><a href="#cb13-11" aria-hidden="true"></a>    BLOCK_K <span class="op">=</span> <span class="dv">64</span></span>
+<span id="cb13-12"><a href="#cb13-12" aria-hidden="true"></a></span>
+<span id="cb13-13"><a href="#cb13-13" aria-hidden="true"></a>    num_m <span class="op">=</span> triton.cdiv(M, BLOCK_M)</span>
+<span id="cb13-14"><a href="#cb13-14" aria-hidden="true"></a>    num_n <span class="op">=</span> triton.cdiv(N, BLOCK_N)</span>
+<span id="cb13-15"><a href="#cb13-15" aria-hidden="true"></a></span>
+<span id="cb13-16"><a href="#cb13-16" aria-hidden="true"></a>    matmul_simple_kernel[(num_m, num_n)](</span>
+<span id="cb13-17"><a href="#cb13-17" aria-hidden="true"></a>        A, B, C,</span>
+<span id="cb13-18"><a href="#cb13-18" aria-hidden="true"></a>        M, N, K,</span>
+<span id="cb13-19"><a href="#cb13-19" aria-hidden="true"></a>        A.stride(<span class="dv">0</span>), A.stride(<span class="dv">1</span>),</span>
+<span id="cb13-20"><a href="#cb13-20" aria-hidden="true"></a>        B.stride(<span class="dv">0</span>), B.stride(<span class="dv">1</span>),</span>
+<span id="cb13-21"><a href="#cb13-21" aria-hidden="true"></a>        C.stride(<span class="dv">0</span>), C.stride(<span class="dv">1</span>),</span>
+<span id="cb13-22"><a href="#cb13-22" aria-hidden="true"></a>        BLOCK_M, BLOCK_N, BLOCK_K,</span>
+<span id="cb13-23"><a href="#cb13-23" aria-hidden="true"></a>    )</span>
+<span id="cb13-24"><a href="#cb13-24" aria-hidden="true"></a>    <span class="cf">return</span> C</span></code></pre></div>
+<p><strong>关键：</strong> strides 是从 <code>tensor.stride()</code> 获取的，不是 <code>tensor.shape</code>！</p>
+<div class="sourceCode" id="cb14"><pre class="sourceCode python"><code class="sourceCode python"><span id="cb14-1"><a href="#cb14-1" aria-hidden="true"></a><span class="op">&gt;&gt;&gt;</span> x <span class="op">=</span> torch.randn(<span class="dv">128</span>, <span class="dv">256</span>)</span>
+<span id="cb14-2"><a href="#cb14-2" aria-hidden="true"></a><span class="op">&gt;&gt;&gt;</span> x.shape    <span class="co"># (128, 256)</span></span>
+<span id="cb14-3"><a href="#cb14-3" aria-hidden="true"></a><span class="op">&gt;&gt;&gt;</span> x.stride() <span class="co"># (256, 1)  ← 每行的字节偏移是 256 (256*4 bytes = 1024 bytes)</span></span></code></pre></div>
+<hr />
+<h2 id="正确性验证">5. 正确性验证</h2>
+<h3 id="小矩阵测试">5.1 小矩阵测试</h3>
+<div class="sourceCode" id="cb15"><pre class="sourceCode python"><code class="sourceCode python"><span id="cb15-1"><a href="#cb15-1" aria-hidden="true"></a>M, K, N <span class="op">=</span> <span class="dv">128</span>, <span class="dv">128</span>, <span class="dv">128</span></span>
+<span id="cb15-2"><a href="#cb15-2" aria-hidden="true"></a>A <span class="op">=</span> torch.randn(M, K, device<span class="op">=</span><span class="st">&quot;cuda&quot;</span>, dtype<span class="op">=</span>torch.float16)</span>
+<span id="cb15-3"><a href="#cb15-3" aria-hidden="true"></a>B <span class="op">=</span> torch.randn(K, N, device<span class="op">=</span><span class="st">&quot;cuda&quot;</span>, dtype<span class="op">=</span>torch.float16)</span>
+<span id="cb15-4"><a href="#cb15-4" aria-hidden="true"></a></span>
+<span id="cb15-5"><a href="#cb15-5" aria-hidden="true"></a>C_torch <span class="op">=</span> A <span class="op">@</span> B</span>
+<span id="cb15-6"><a href="#cb15-6" aria-hidden="true"></a>C_triton <span class="op">=</span> matmul_simple_wrapper(A, B)</span>
+<span id="cb15-7"><a href="#cb15-7" aria-hidden="true"></a></span>
+<span id="cb15-8"><a href="#cb15-8" aria-hidden="true"></a>diff <span class="op">=</span> (C_torch <span class="op">-</span> C_triton).<span class="bu">abs</span>().<span class="bu">max</span>().item()</span>
+<span id="cb15-9"><a href="#cb15-9" aria-hidden="true"></a><span class="bu">print</span>(<span class="ss">f&quot;max diff: </span><span class="sc">{</span>diff<span class="sc">:.2e}</span><span class="ss">&quot;</span>)  <span class="co"># 预期: &lt; 1.0 (fp16 精度)</span></span></code></pre></div>
+<h3 id="不同尺寸测试">5.2 不同尺寸测试</h3>
+<div class="sourceCode" id="cb16"><pre class="sourceCode python"><code class="sourceCode python"><span id="cb16-1"><a href="#cb16-1" aria-hidden="true"></a><span class="cf">for</span> M, K, N <span class="kw">in</span> [(<span class="dv">64</span>, <span class="dv">64</span>, <span class="dv">64</span>), (<span class="dv">128</span>, <span class="dv">256</span>, <span class="dv">128</span>), (<span class="dv">256</span>, <span class="dv">512</span>, <span class="dv">256</span>)]:</span>
+<span id="cb16-2"><a href="#cb16-2" aria-hidden="true"></a>    <span class="co"># 测试</span></span></code></pre></div>
+<h3 id="为什么有误差">5.3 为什么有误差？</h3>
+<pre><code>FP16 的精度: ~3 位有效数字
+FP16 matmul 的累积误差: 随 K 增大而增大
+
+max diff = 0.5 ~ 2.0 是正常的
+max diff &lt; 10.0 通常可以接受</code></pre>
+<p><strong>如果用 FP32：</strong> 误差会小到 <code>1e-5</code> 级别。</p>
+<hr />
+<h2 id="性能对比">6. 性能对比</h2>
+<h3 id="对比-pytorch-原生">6.1 对比 PyTorch 原生</h3>
+<div class="sourceCode" id="cb18"><pre class="sourceCode python"><code class="sourceCode python"><span id="cb18-1"><a href="#cb18-1" aria-hidden="true"></a><span class="cf">for</span> size <span class="kw">in</span> [<span class="dv">512</span>, <span class="dv">1024</span>, <span class="dv">2048</span>]:</span>
+<span id="cb18-2"><a href="#cb18-2" aria-hidden="true"></a>    M <span class="op">=</span> K <span class="op">=</span> N <span class="op">=</span> size</span>
+<span id="cb18-3"><a href="#cb18-3" aria-hidden="true"></a>    A <span class="op">=</span> torch.randn(M, K, device<span class="op">=</span><span class="st">&quot;cuda&quot;</span>, dtype<span class="op">=</span>torch.float16)</span>
+<span id="cb18-4"><a href="#cb18-4" aria-hidden="true"></a>    B <span class="op">=</span> torch.randn(K, N, device<span class="op">=</span><span class="st">&quot;cuda&quot;</span>, dtype<span class="op">=</span>torch.float16)</span>
+<span id="cb18-5"><a href="#cb18-5" aria-hidden="true"></a></span>
+<span id="cb18-6"><a href="#cb18-6" aria-hidden="true"></a>    <span class="co"># PyTorch</span></span>
+<span id="cb18-7"><a href="#cb18-7" aria-hidden="true"></a>    pytorch_time <span class="op">=</span> benchmark(A <span class="op">@</span> B)</span>
+<span id="cb18-8"><a href="#cb18-8" aria-hidden="true"></a></span>
+<span id="cb18-9"><a href="#cb18-9" aria-hidden="true"></a>    <span class="co"># Triton</span></span>
+<span id="cb18-10"><a href="#cb18-10" aria-hidden="true"></a>    triton_time <span class="op">=</span> benchmark(matmul_simple_wrapper(A, B))</span>
+<span id="cb18-11"><a href="#cb18-11" aria-hidden="true"></a></span>
+<span id="cb18-12"><a href="#cb18-12" aria-hidden="true"></a>    <span class="bu">print</span>(<span class="ss">f&quot;</span><span class="sc">{</span>size<span class="sc">}</span><span class="ss">x: PyTorch=</span><span class="sc">{</span>pytorch<span class="sc">:.2f}</span><span class="ss">ms, Triton=</span><span class="sc">{</span>triton<span class="sc">:.2f}</span><span class="ss">ms&quot;</span>)</span></code></pre></div>
+<h3 id="预期结果">6.2 预期结果</h3>
+<pre><code>(512, 512, 512): PyTorch=0.15ms, Triton=0.45ms  (ratio=0.33x)
+(1024, 1024, 1024): PyTorch=1.50ms, Triton=3.00ms (ratio=0.50x)
+(2048, 2048, 2048): PyTorch=15.00ms, Triton=20.00ms (ratio=0.75x)</code></pre>
+<p><strong>为什么比 PyTorch 慢？</strong></p>
+<ol type="1">
+<li>我们的实现没有用 Shared Memory（<code>tl.dot</code> 内部会尝试用，但不如手写优化）</li>
+<li>没有用 Tensor Core 的 tile size 优化</li>
+<li>没有做循环展开（loop unrolling）</li>
+</ol>
+<p><strong>但这不重要！</strong> 我们的目标是理解 Tiling 的原理。真正的生产级 matmul kernel（如 FlashAttention 用的）会做更多优化。</p>
+<hr />
+<h2 id="动手练习">7. 动手练习</h2>
+<h3 id="练习-1理解-mask">练习 1：理解 mask</h3>
+<div class="sourceCode" id="cb20"><pre class="sourceCode python"><code class="sourceCode python"><span id="cb20-1"><a href="#cb20-1" aria-hidden="true"></a><span class="co"># 如果 M=100, BLOCK_M=64, 有几个 block?</span></span>
+<span id="cb20-2"><a href="#cb20-2" aria-hidden="true"></a>num_m <span class="op">=</span> triton.cdiv(<span class="dv">100</span>, <span class="dv">64</span>)  <span class="co"># = 2</span></span>
+<span id="cb20-3"><a href="#cb20-3" aria-hidden="true"></a></span>
+<span id="cb20-4"><a href="#cb20-4" aria-hidden="true"></a><span class="co"># 第一个 block 处理哪些行?</span></span>
+<span id="cb20-5"><a href="#cb20-5" aria-hidden="true"></a><span class="co"># pid_m=0: offset_m = [0, 1, ..., 63]  — 全部有效</span></span>
+<span id="cb20-6"><a href="#cb20-6" aria-hidden="true"></a></span>
+<span id="cb20-7"><a href="#cb20-7" aria-hidden="true"></a><span class="co"># 第二个 block 处理哪些行?</span></span>
+<span id="cb20-8"><a href="#cb20-8" aria-hidden="true"></a><span class="co"># pid_m=1: offset_m = [64, 65, ..., 127]</span></span>
+<span id="cb20-9"><a href="#cb20-9" aria-hidden="true"></a><span class="co"># 但 M=100, 所以 offset_m &gt;= 100 的行被 mask 掉</span></span>
+<span id="cb20-10"><a href="#cb20-10" aria-hidden="true"></a><span class="co"># 有效行: [64, 65, ..., 99] (共 36 行)</span></span></code></pre></div>
+<h3 id="练习-2修改-block-大小">练习 2：修改 Block 大小</h3>
+<p>尝试以下组合，观察对正确性和性能的影响：</p>
+<table>
+<thead>
+<tr class="header">
+<th>BLOCK_M</th>
+<th>BLOCK_N</th>
+<th>BLOCK_K</th>
+<th>说明</th>
+</tr>
+</thead>
+<tbody>
+<tr class="odd">
+<td>32</td>
+<td>32</td>
+<td>32</td>
+<td>小块，更多 block</td>
+</tr>
+<tr class="even">
+<td>64</td>
+<td>64</td>
+<td>64</td>
+<td>标准配置</td>
+</tr>
+<tr class="odd">
+<td>128</td>
+<td>128</td>
+<td>128</td>
+<td>大块，更少 block</td>
+</tr>
+<tr class="even">
+<td>64</td>
+<td>64</td>
+<td>32</td>
+<td>K 块比 M,N 块小</td>
+</tr>
+</tbody>
+</table>
+<h3 id="练习-3理解-stride">练习 3：理解 stride</h3>
+<div class="sourceCode" id="cb21"><pre class="sourceCode python"><code class="sourceCode python"><span id="cb21-1"><a href="#cb21-1" aria-hidden="true"></a><span class="op">&gt;&gt;&gt;</span> x <span class="op">=</span> torch.randn(<span class="dv">128</span>, <span class="dv">256</span>, device<span class="op">=</span><span class="st">&quot;cuda&quot;</span>)</span>
+<span id="cb21-2"><a href="#cb21-2" aria-hidden="true"></a><span class="op">&gt;&gt;&gt;</span> x.stride()  <span class="co"># (256, 1)</span></span>
+<span id="cb21-3"><a href="#cb21-3" aria-hidden="true"></a><span class="op">&gt;&gt;&gt;</span> x.T.stride()  <span class="co"># (1, 256) ← 转置后 stride 变了!</span></span></code></pre></div>
+<p><strong>问题：</strong> 如果传入一个转置过的矩阵给 kernel，stride 应该怎么传？</p>
+<details>
+<p><summary>点击查看</summary></p>
+<p>传入 <code>A.T</code> 时，<code>A.T.stride(0) = A.stride(1) = 1</code>，<code>A.T.stride(1) = A.stride(0) = 256</code>。</p>
+<p>kernel 中用 <code>A.T.stride(0), A.T.stride(1)</code> 即可，不需要手动交换。 Triton kernel 通过 stride 自动适配不同的内存布局。</p>
+</details>
+<hr />
+<h2 id="核心知识点总结">8. 核心知识点总结</h2>
+<h3 id="tiling-模板">8.1 Tiling 模板</h3>
+<div class="sourceCode" id="cb22"><pre class="sourceCode python"><code class="sourceCode python"><span id="cb22-1"><a href="#cb22-1" aria-hidden="true"></a><span class="at">@triton.jit</span></span>
+<span id="cb22-2"><a href="#cb22-2" aria-hidden="true"></a><span class="kw">def</span> matmul_kernel(A, B, C, M, N, K, ...):</span>
+<span id="cb22-3"><a href="#cb22-3" aria-hidden="true"></a>    <span class="co"># 1. 确定 C 的子块位置</span></span>
+<span id="cb22-4"><a href="#cb22-4" aria-hidden="true"></a>    pid_m <span class="op">=</span> tl.program_id(<span class="dv">0</span>)</span>
+<span id="cb22-5"><a href="#cb22-5" aria-hidden="true"></a>    pid_n <span class="op">=</span> tl.program_id(<span class="dv">1</span>)</span>
+<span id="cb22-6"><a href="#cb22-6" aria-hidden="true"></a></span>
+<span id="cb22-7"><a href="#cb22-7" aria-hidden="true"></a>    <span class="co"># 2. 生成偏移</span></span>
+<span id="cb22-8"><a href="#cb22-8" aria-hidden="true"></a>    offset_m <span class="op">=</span> pid_m <span class="op">*</span> BLOCK_M <span class="op">+</span> tl.arange(<span class="dv">0</span>, BLOCK_M)</span>
+<span id="cb22-9"><a href="#cb22-9" aria-hidden="true"></a>    offset_n <span class="op">=</span> pid_n <span class="op">*</span> BLOCK_N <span class="op">+</span> tl.arange(<span class="dv">0</span>, BLOCK_N)</span>
+<span id="cb22-10"><a href="#cb22-10" aria-hidden="true"></a></span>
+<span id="cb22-11"><a href="#cb22-11" aria-hidden="true"></a>    <span class="co"># 3. 初始化累加器</span></span>
+<span id="cb22-12"><a href="#cb22-12" aria-hidden="true"></a>    acc <span class="op">=</span> tl.zeros((BLOCK_M, BLOCK_N), dtype<span class="op">=</span>tl.float32)</span>
+<span id="cb22-13"><a href="#cb22-13" aria-hidden="true"></a></span>
+<span id="cb22-14"><a href="#cb22-14" aria-hidden="true"></a>    <span class="co"># 4. 循环 K 维度</span></span>
+<span id="cb22-15"><a href="#cb22-15" aria-hidden="true"></a>    <span class="cf">for</span> k <span class="kw">in</span> <span class="bu">range</span>(<span class="dv">0</span>, K, BLOCK_K):</span>
+<span id="cb22-16"><a href="#cb22-16" aria-hidden="true"></a>        <span class="co"># 5. 加载子块 (带 mask)</span></span>
+<span id="cb22-17"><a href="#cb22-17" aria-hidden="true"></a>        a <span class="op">=</span> tl.load(A_ptrs, mask<span class="op">=</span>...)</span>
+<span id="cb22-18"><a href="#cb22-18" aria-hidden="true"></a>        b <span class="op">=</span> tl.load(B_ptrs, mask<span class="op">=</span>...)</span>
+<span id="cb22-19"><a href="#cb22-19" aria-hidden="true"></a>        <span class="co"># 6. mini matmul</span></span>
+<span id="cb22-20"><a href="#cb22-20" aria-hidden="true"></a>        acc <span class="op">+=</span> tl.dot(a, b)</span>
+<span id="cb22-21"><a href="#cb22-21" aria-hidden="true"></a></span>
+<span id="cb22-22"><a href="#cb22-22" aria-hidden="true"></a>    <span class="co"># 7. 写回</span></span>
+<span id="cb22-23"><a href="#cb22-23" aria-hidden="true"></a>    tl.store(C_ptrs, acc.to(C.<span class="bu">type</span>), mask<span class="op">=</span>...)</span></code></pre></div>
+<h3 id="关键公式">8.2 关键公式</h3>
+<pre><code>内存访问 (朴素):  2 × M × N × K 次读
+内存访问 (Tiled):  M × K + K × N + M × N 次读写
+
+加速比: 约 K 倍 (当 M ≈ N ≈ K 时)</code></pre>
+<h3 id="设计决策">8.3 设计决策</h3>
+<table>
+<thead>
+<tr class="header">
+<th>参数</th>
+<th>推荐值</th>
+<th>原因</th>
+</tr>
+</thead>
+<tbody>
+<tr class="odd">
+<td>BLOCK_M, BLOCK_N</td>
+<td>64 或 128</td>
+<td>平衡 occupancy 和寄存器压力</td>
+</tr>
+<tr class="even">
+<td>BLOCK_K</td>
+<td>与 M,N 相同或一半</td>
+<td>影响 K 维度循环次数</td>
+</tr>
+<tr class="odd">
+<td>acc dtype</td>
+<td>float32</td>
+<td>避免 fp16 累积溢出</td>
+</tr>
+</tbody>
+</table>
+<hr />
+<h2 id="下一章预告">9. 下一章预告</h2>
+<p>有了矩阵乘法的 Tiling 基础，下一章我们将实现 <strong>FlashAttention</strong> — 矩阵乘法和 Online Softmax 的组合。</p>
+<p>FlashAttention 的核心就是： 1. 用 Tiled MatMul 计算 <code>S = Q @ K^T</code> 2. 用 Online Softmax 避免存储完整的 S 矩阵 3. 最终结果 <code>O = P @ V</code> 也是 tiled 的</p>
+<p><strong>运行本章代码：</strong> <code>python 04_matmul.py</code> <strong>下一章：</strong> 第五章 — FlashAttention Forward（本章是整个教程的核心）</p>

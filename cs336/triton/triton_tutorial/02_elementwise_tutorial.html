@@ -1,0 +1,230 @@
+<h1 id="第二章元素级操作-relu-gelu-silu">第二章：元素级操作 — ReLU, GeLU, Silu</h1>
+<blockquote>
+<p><strong>你将学到什么：</strong> - 实现三种常见激活函数的 Triton kernel - 理解 <code>tl.maximum</code>, <code>tl.exp</code>, <code>tl.where</code> 等常用函数 - 手动展开 <code>tanh</code> 公式（因为 Triton 没有 <code>tl.tanh</code>） - 对比 PyTorch 原生实现和 Triton 实现的性能</p>
+<p><strong>前置知识：</strong> 第一章（Hello World 模板） <strong>预计时间：</strong> 45 分钟 <strong>最终成果：</strong> 3 个激活函数 kernel + 性能对比程序</p>
+</blockquote>
+<hr />
+<h2 id="元素级操作的本质">1. 元素级操作的本质</h2>
+<p>元素级操作（Elementwise Operation）是最简单的 GPU 并行任务：</p>
+<pre><code>输入: [x₀, x₁, x₂, ..., xₙ₋₁]    每个元素独立
+输出: [f(x₀), f(x₁), f(x₂), ..., f(xₙ₋₁)]  每个结果只依赖对应输入</code></pre>
+<p><strong>每个线程处理一个元素，线程之间没有任何依赖。</strong> 这就是元素级操作最简单的原因。</p>
+<h3 id="本章要实现的三个激活函数">1.1 本章要实现的三个激活函数</h3>
+<table>
+<thead>
+<tr class="header">
+<th>激活函数</th>
+<th>公式</th>
+<th>用途</th>
+</tr>
+</thead>
+<tbody>
+<tr class="odd">
+<td><strong>ReLU</strong></td>
+<td><code>max(0, x)</code></td>
+<td>最常用的非线性激活</td>
+</tr>
+<tr class="even">
+<td><strong>Silu</strong></td>
+<td><code>x · σ(x) = x / (1 + e⁻ˣ)</code></td>
+<td>Swish 函数，GPT-2/3 使用</td>
+</tr>
+<tr class="odd">
+<td><strong>GeLU</strong></td>
+<td><code>0.5 · x · (1 + tanh(√(2/π) · (x + 0.044715·x³)))</code></td>
+<td>Transformer 标配</td>
+</tr>
+</tbody>
+</table>
+<hr />
+<h2 id="relu-最简单的非线性">2. ReLU — 最简单的非线性</h2>
+<h3 id="公式">2.1 公式</h3>
+<pre><code>ReLU(x) = max(0, x)
+         = { x,  if x &gt; 0
+         { 0,  if x ≤ 0</code></pre>
+<h3 id="triton-实现">2.2 Triton 实现</h3>
+<div class="sourceCode" id="cb3"><pre class="sourceCode python"><code class="sourceCode python"><span id="cb3-1"><a href="#cb3-1" aria-hidden="true"></a><span class="at">@triton.jit</span></span>
+<span id="cb3-2"><a href="#cb3-2" aria-hidden="true"></a><span class="kw">def</span> relu_kernel(x_ptr, y_ptr, n_elements, BLOCK_SIZE: tl.constexpr):</span>
+<span id="cb3-3"><a href="#cb3-3" aria-hidden="true"></a>    pid <span class="op">=</span> tl.program_id(axis<span class="op">=</span><span class="dv">0</span>)</span>
+<span id="cb3-4"><a href="#cb3-4" aria-hidden="true"></a>    block_start <span class="op">=</span> pid <span class="op">*</span> BLOCK_SIZE</span>
+<span id="cb3-5"><a href="#cb3-5" aria-hidden="true"></a>    offsets <span class="op">=</span> block_start <span class="op">+</span> tl.arange(<span class="dv">0</span>, BLOCK_SIZE)</span>
+<span id="cb3-6"><a href="#cb3-6" aria-hidden="true"></a>    mask <span class="op">=</span> offsets <span class="op">&lt;</span> n_elements</span>
+<span id="cb3-7"><a href="#cb3-7" aria-hidden="true"></a></span>
+<span id="cb3-8"><a href="#cb3-8" aria-hidden="true"></a>    x <span class="op">=</span> tl.load(x_ptr <span class="op">+</span> offsets, mask<span class="op">=</span>mask)</span>
+<span id="cb3-9"><a href="#cb3-9" aria-hidden="true"></a>    y <span class="op">=</span> tl.maximum(x, <span class="fl">0.0</span>)  <span class="co"># ← 这就是 max(0, x)</span></span>
+<span id="cb3-10"><a href="#cb3-10" aria-hidden="true"></a>    tl.store(y_ptr <span class="op">+</span> offsets, y, mask<span class="op">=</span>mask)</span></code></pre></div>
+<h3 id="逐行理解">2.3 逐行理解</h3>
+<pre><code>tl.maximum(x, 0.0)</code></pre>
+<p>这就是 <code>max(0, x)</code> 的 Triton 写法。它自动向量化 — 对 <code>offsets</code> 中的每个元素都执行 <code>max</code>。</p>
+<p><strong>注意：</strong> 不需要写 <code>if</code> 判断。GPU 的 SIMD 架构会自动处理分支。</p>
+<hr />
+<h2 id="silu-swish-带除法的激活函数">3. Silu (Swish) — 带除法的激活函数</h2>
+<h3 id="公式-1">3.1 公式</h3>
+<pre><code>Silu(x) = x · σ(x)
+        = x / (1 + e⁻ˣ)</code></pre>
+<h3 id="triton-实现-1">3.2 Triton 实现</h3>
+<div class="sourceCode" id="cb6"><pre class="sourceCode python"><code class="sourceCode python"><span id="cb6-1"><a href="#cb6-1" aria-hidden="true"></a><span class="at">@triton.jit</span></span>
+<span id="cb6-2"><a href="#cb6-2" aria-hidden="true"></a><span class="kw">def</span> silu_kernel(x_ptr, y_ptr, n_elements, BLOCK_SIZE: tl.constexpr):</span>
+<span id="cb6-3"><a href="#cb6-3" aria-hidden="true"></a>    pid <span class="op">=</span> tl.program_id(axis<span class="op">=</span><span class="dv">0</span>)</span>
+<span id="cb6-4"><a href="#cb6-4" aria-hidden="true"></a>    offsets <span class="op">=</span> pid <span class="op">*</span> BLOCK_SIZE <span class="op">+</span> tl.arange(<span class="dv">0</span>, BLOCK_SIZE)</span>
+<span id="cb6-5"><a href="#cb6-5" aria-hidden="true"></a>    mask <span class="op">=</span> offsets <span class="op">&lt;</span> n_elements</span>
+<span id="cb6-6"><a href="#cb6-6" aria-hidden="true"></a></span>
+<span id="cb6-7"><a href="#cb6-7" aria-hidden="true"></a>    x <span class="op">=</span> tl.load(x_ptr <span class="op">+</span> offsets, mask<span class="op">=</span>mask)</span>
+<span id="cb6-8"><a href="#cb6-8" aria-hidden="true"></a></span>
+<span id="cb6-9"><a href="#cb6-9" aria-hidden="true"></a>    <span class="co"># σ(x) = 1 / (1 + exp(-x))</span></span>
+<span id="cb6-10"><a href="#cb6-10" aria-hidden="true"></a>    sigmoid_x <span class="op">=</span> <span class="fl">1.0</span> <span class="op">/</span> (<span class="fl">1.0</span> <span class="op">+</span> tl.exp(<span class="op">-</span>x))</span>
+<span id="cb6-11"><a href="#cb6-11" aria-hidden="true"></a>    y <span class="op">=</span> x <span class="op">*</span> sigmoid_x</span>
+<span id="cb6-12"><a href="#cb6-12" aria-hidden="true"></a></span>
+<span id="cb6-13"><a href="#cb6-13" aria-hidden="true"></a>    tl.store(y_ptr <span class="op">+</span> offsets, y, mask<span class="op">=</span>mask)</span></code></pre></div>
+<h3 id="理解">3.3 理解</h3>
+<p>这个 kernel 展示了 Triton 的<strong>向量化计算</strong>： - <code>tl.exp(-x)</code> — 对每个元素求 <code>exp(-x)</code> - <code>1.0 / (1.0 + ...)</code> — 每个元素做除法 - <code>x * sigmoid_x</code> — 每个元素做乘法</p>
+<p><strong>全部是向量化的，一行代码等于 N 个元素的计算。</strong></p>
+<hr />
+<h2 id="gelu-最复杂的元素级操作">4. GeLU — 最复杂的元素级操作</h2>
+<h3 id="公式-2">4.1 公式</h3>
+<pre><code>GeLU(x) = 0.5 · x · (1 + tanh(√(2/π) · (x + 0.044715 · x³)))</code></pre>
+<h3 id="问题triton-没有-tl.tanh">4.2 问题：Triton 没有 <code>tl.tanh</code></h3>
+<p>Triton 没有提供 <code>tl.tanh</code> 函数，但我们可以手动展开：</p>
+<pre><code>tanh(a) = (eᵃ - e⁻ᵃ) / (eᵃ + e⁻ᵃ)
+        = (e²ᵃ - 1) / (e²ᵃ + 1)</code></pre>
+<p>推导：</p>
+<pre><code>tanh(a) = sinh(a) / cosh(a)
+        = (eᵃ - e⁻ᵃ) / (eᵃ + e⁻ᵃ)     ← 分子分母同乘 eᵃ
+        = (e²ᵃ - 1) / (e²ᵃ + 1)        ← 这就是我们要的</code></pre>
+<h3 id="triton-实现-2">4.3 Triton 实现</h3>
+<div class="sourceCode" id="cb10"><pre class="sourceCode python"><code class="sourceCode python"><span id="cb10-1"><a href="#cb10-1" aria-hidden="true"></a><span class="at">@triton.jit</span></span>
+<span id="cb10-2"><a href="#cb10-2" aria-hidden="true"></a><span class="kw">def</span> gelu_kernel(x_ptr, y_ptr, n_elements, BLOCK_SIZE: tl.constexpr):</span>
+<span id="cb10-3"><a href="#cb10-3" aria-hidden="true"></a>    pid <span class="op">=</span> tl.program_id(axis<span class="op">=</span><span class="dv">0</span>)</span>
+<span id="cb10-4"><a href="#cb10-4" aria-hidden="true"></a>    offsets <span class="op">=</span> pid <span class="op">*</span> BLOCK_SIZE <span class="op">+</span> tl.arange(<span class="dv">0</span>, BLOCK_SIZE)</span>
+<span id="cb10-5"><a href="#cb10-5" aria-hidden="true"></a>    mask <span class="op">=</span> offsets <span class="op">&lt;</span> n_elements</span>
+<span id="cb10-6"><a href="#cb10-6" aria-hidden="true"></a></span>
+<span id="cb10-7"><a href="#cb10-7" aria-hidden="true"></a>    x <span class="op">=</span> tl.load(x_ptr <span class="op">+</span> offsets, mask<span class="op">=</span>mask)</span>
+<span id="cb10-8"><a href="#cb10-8" aria-hidden="true"></a></span>
+<span id="cb10-9"><a href="#cb10-9" aria-hidden="true"></a>    <span class="co"># 常量</span></span>
+<span id="cb10-10"><a href="#cb10-10" aria-hidden="true"></a>    <span class="co"># √(2/π) ≈ 0.79788456</span></span>
+<span id="cb10-11"><a href="#cb10-11" aria-hidden="true"></a>    a <span class="op">=</span> <span class="fl">0.79788456</span> <span class="op">*</span> (x <span class="op">+</span> <span class="fl">0.044715</span> <span class="op">*</span> x <span class="op">*</span> x <span class="op">*</span> x)</span>
+<span id="cb10-12"><a href="#cb10-12" aria-hidden="true"></a></span>
+<span id="cb10-13"><a href="#cb10-13" aria-hidden="true"></a>    <span class="co"># 展开 tanh(a) = (exp(2a) - 1) / (exp(2a) + 1)</span></span>
+<span id="cb10-14"><a href="#cb10-14" aria-hidden="true"></a>    exp_2a <span class="op">=</span> tl.exp(<span class="dv">2</span> <span class="op">*</span> a)</span>
+<span id="cb10-15"><a href="#cb10-15" aria-hidden="true"></a>    tanh_a <span class="op">=</span> (exp_2a <span class="op">-</span> <span class="fl">1.0</span>) <span class="op">/</span> (exp_2a <span class="op">+</span> <span class="fl">1.0</span>)</span>
+<span id="cb10-16"><a href="#cb10-16" aria-hidden="true"></a></span>
+<span id="cb10-17"><a href="#cb10-17" aria-hidden="true"></a>    y <span class="op">=</span> <span class="fl">0.5</span> <span class="op">*</span> x <span class="op">*</span> (<span class="fl">1.0</span> <span class="op">+</span> tanh_a)</span>
+<span id="cb10-18"><a href="#cb10-18" aria-hidden="true"></a>    tl.store(y_ptr <span class="op">+</span> offsets, y, mask<span class="op">=</span>mask)</span></code></pre></div>
+<h3 id="逐行拆解">4.4 逐行拆解</h3>
+<pre><code>x³        → x * x * x                        # 三次方
+0.044715·x³  → 0.044715 * x * x * x           # 乘以常数
+x + 0.044715·x³ → x + 0.044715 * x * x * x   # 相加
+√(2/π)·(...) → 0.79788456 * (...)             # 乘以 √(2/π)
+tanh(a) → (exp(2a) - 1) / (exp(2a) + 1)      # 展开
+0.5·x·(1+tanh) → 0.5 * x * (1 + tanh_a)      # 最终计算</code></pre>
+<p><strong>每一步都是向量化的</strong>，同时处理 BLOCK_SIZE 个元素。</p>
+<hr />
+<h2 id="性能对比-为什么用-triton">5. 性能对比 — 为什么用 Triton？</h2>
+<h3 id="三种实现方式">5.1 三种实现方式</h3>
+<table>
+<thead>
+<tr class="header">
+<th>方式</th>
+<th>代码量</th>
+<th>运行位置</th>
+<th>速度</th>
+</tr>
+</thead>
+<tbody>
+<tr class="odd">
+<td>手写 Python</td>
+<td>~5 行</td>
+<td>CPU</td>
+<td>🐌 最慢（基准）</td>
+</tr>
+<tr class="even">
+<td>PyTorch 原生</td>
+<td>~1 行</td>
+<td>C++ 后端</td>
+<td>🐇 快</td>
+</tr>
+<tr class="odd">
+<td>Triton kernel</td>
+<td>~15 行</td>
+<td>GPU kernel</td>
+<td>🚀 通常最快或接近最快</td>
+</tr>
+</tbody>
+</table>
+<h3 id="为什么手写-python-很慢">5.2 为什么手写 Python 很慢？</h3>
+<div class="sourceCode" id="cb12"><pre class="sourceCode python"><code class="sourceCode python"><span id="cb12-1"><a href="#cb12-1" aria-hidden="true"></a><span class="kw">def</span> manual_relu(x):</span>
+<span id="cb12-2"><a href="#cb12-2" aria-hidden="true"></a>    result <span class="op">=</span> torch.empty_like(x)</span>
+<span id="cb12-3"><a href="#cb12-3" aria-hidden="true"></a>    <span class="cf">for</span> i <span class="kw">in</span> <span class="bu">range</span>(x.numel()):     <span class="co"># ← Python 循环！</span></span>
+<span id="cb12-4"><a href="#cb12-4" aria-hidden="true"></a>        result[i] <span class="op">=</span> <span class="bu">max</span>(<span class="fl">0.0</span>, x[i])  <span class="co"># ← 每次迭代都有 Python 开销</span></span>
+<span id="cb12-5"><a href="#cb12-5" aria-hidden="true"></a>    <span class="cf">return</span> result</span></code></pre></div>
+<p>每个循环迭代都有 Python 解释器的开销（字节码调度、类型检查等）。</p>
+<h3 id="为什么-pytorch-原生很快">5.3 为什么 PyTorch 原生很快？</h3>
+<div class="sourceCode" id="cb13"><pre class="sourceCode python"><code class="sourceCode python"><span id="cb13-1"><a href="#cb13-1" aria-hidden="true"></a>y <span class="op">=</span> torch.relu(x)  <span class="co"># ← C++ CUDA kernel，高度优化</span></span></code></pre></div>
+<p>PyTorch 的 <code>torch.relu</code> 调用的是 NVIDIA CUTLASS 等高度优化的 CUDA kernel。</p>
+<h3 id="为什么-triton-也很重要">5.4 为什么 Triton 也很重要？</h3>
+<div class="sourceCode" id="cb14"><pre class="sourceCode python"><code class="sourceCode python"><span id="cb14-1"><a href="#cb14-1" aria-hidden="true"></a>y <span class="op">=</span> triton_relu_wrapper(x)  <span class="co"># ← Triton kernel</span></span></code></pre></div>
+<p>Triton 的优势不在于单个激活函数（因为 PyTorch 已经高度优化），而在于：</p>
+<ol type="1">
+<li><strong>Kernel Fusion</strong> — 把多个操作合成一个 kernel，减少显存读写</li>
+<li><strong>自定义操作</strong> — PyTorch 没有的内核，你可以自己写</li>
+<li><strong>学习 GPU 编程</strong> — 理解底层原理</li>
+</ol>
+<blockquote>
+<p><strong>核心原理：</strong> 减少显存读写。 朴素写法：每个操作读一次、写一次 → N 次操作 = N 次显存读写 Fused 写法：一个 kernel 完成所有操作 → N 次操作 = 1 次读 + 1 次写</p>
+</blockquote>
+<hr />
+<h2 id="动手练习">6. 动手练习</h2>
+<h3 id="练习-1实现-elu-激活函数">练习 1：实现 Elu 激活函数</h3>
+<pre><code>Elu(x) = { x,           if x &gt; 0
+         { α·(eˣ - 1),  if x ≤ 0</code></pre>
+<p>提示：用 <code>tl.where(condition, a, b)</code> 做条件选择。</p>
+<h3 id="练习-2实现-hardsigmoid">练习 2：实现 HardSigmoid</h3>
+<pre><code>HardSigmoid(x) = clip((x + 1) / 2, 0, 1)</code></pre>
+<p>提示：<code>tl.minimum(tl.maximum((x + 1) / 2, 0.0), 1.0)</code></p>
+<h3 id="练习-3性能实验">练习 3：性能实验</h3>
+<p>修改 <code>benchmark_comparison()</code> 中的张量大小，观察以下规律：</p>
+<div class="sourceCode" id="cb17"><pre class="sourceCode python"><code class="sourceCode python"><span id="cb17-1"><a href="#cb17-1" aria-hidden="true"></a><span class="cf">for</span> size <span class="kw">in</span> [<span class="dv">1024</span>, <span class="dv">10240</span>, <span class="dv">102400</span>, <span class="dv">1048576</span>]:</span>
+<span id="cb17-2"><a href="#cb17-2" aria-hidden="true"></a>    x <span class="op">=</span> torch.randn(size, device<span class="op">=</span><span class="st">&quot;cuda&quot;</span>)</span>
+<span id="cb17-3"><a href="#cb17-3" aria-hidden="true"></a>    <span class="co"># 比较三种实现的时间</span></span></code></pre></div>
+<p><strong>思考：</strong> 为什么 PyTorch 在小张量（1024 元素）上的优势不明显？</p>
+<details>
+<p><summary>点击查看分析</summary></p>
+<p>小张量时，GPU kernel 的启动开销（kernel launch overhead）占了很大比例。 随着张量增大，计算时间增长，启动开销占比减小，PyTorch 的优化优势才显现。</p>
+<p>Triton 的启动开销与 PyTorch 相当（两者都是 CUDA kernel），所以在大张量时两者接近。</p>
+</details>
+<hr />
+<h2 id="核心知识点总结">7. 核心知识点总结</h2>
+<h3 id="triton-常用函数速查">7.1 Triton 常用函数速查</h3>
+<div class="sourceCode" id="cb18"><pre class="sourceCode python"><code class="sourceCode python"><span id="cb18-1"><a href="#cb18-1" aria-hidden="true"></a>tl.maximum(a, b)     → 逐元素取 <span class="bu">max</span></span>
+<span id="cb18-2"><a href="#cb18-2" aria-hidden="true"></a>tl.exp(x)            → 逐元素 exp</span>
+<span id="cb18-3"><a href="#cb18-3" aria-hidden="true"></a>tl.where(cond, a, b) → 条件选择: cond ? a : b</span>
+<span id="cb18-4"><a href="#cb18-4" aria-hidden="true"></a>tl.sin(x)            → 逐元素 sin</span>
+<span id="cb18-5"><a href="#cb18-5" aria-hidden="true"></a>tl.cos(x)            → 逐元素 cos</span>
+<span id="cb18-6"><a href="#cb18-6" aria-hidden="true"></a>tl.tanh(x)           → ⚠️ 不存在！手动展开</span></code></pre></div>
+<h3 id="元素级操作模板">7.2 元素级操作模板</h3>
+<div class="sourceCode" id="cb19"><pre class="sourceCode python"><code class="sourceCode python"><span id="cb19-1"><a href="#cb19-1" aria-hidden="true"></a><span class="at">@triton.jit</span></span>
+<span id="cb19-2"><a href="#cb19-2" aria-hidden="true"></a><span class="kw">def</span> kernel(x_ptr, y_ptr, n, BLOCK_SIZE: tl.constexpr):</span>
+<span id="cb19-3"><a href="#cb19-3" aria-hidden="true"></a>    pid <span class="op">=</span> tl.program_id(axis<span class="op">=</span><span class="dv">0</span>)</span>
+<span id="cb19-4"><a href="#cb19-4" aria-hidden="true"></a>    offsets <span class="op">=</span> pid <span class="op">*</span> BLOCK_SIZE <span class="op">+</span> tl.arange(<span class="dv">0</span>, BLOCK_SIZE)</span>
+<span id="cb19-5"><a href="#cb19-5" aria-hidden="true"></a>    mask <span class="op">=</span> offsets <span class="op">&lt;</span> n</span>
+<span id="cb19-6"><a href="#cb19-6" aria-hidden="true"></a></span>
+<span id="cb19-7"><a href="#cb19-7" aria-hidden="true"></a>    x <span class="op">=</span> tl.load(x_ptr <span class="op">+</span> offsets, mask<span class="op">=</span>mask)</span>
+<span id="cb19-8"><a href="#cb19-8" aria-hidden="true"></a>    y <span class="op">=</span> your_formula(x)</span>
+<span id="cb19-9"><a href="#cb19-9" aria-hidden="true"></a>    tl.store(y_ptr <span class="op">+</span> offsets, y, mask<span class="op">=</span>mask)</span>
+<span id="cb19-10"><a href="#cb19-10" aria-hidden="true"></a></span>
+<span id="cb19-11"><a href="#cb19-11" aria-hidden="true"></a><span class="co"># 启动</span></span>
+<span id="cb19-12"><a href="#cb19-12" aria-hidden="true"></a>num_blocks <span class="op">=</span> triton.cdiv(n, BLOCK_SIZE)</span>
+<span id="cb19-13"><a href="#cb19-13" aria-hidden="true"></a>kernel[(num_blocks,)](x, y, n, BLOCK_SIZE<span class="op">=</span>BLOCK_SIZE)</span></code></pre></div>
+<h3 id="tanh-手动展开公式">7.3 tanh 手动展开公式</h3>
+<pre><code>tanh(a) = (exp(2a) - 1) / (exp(2a) + 1)</code></pre>
+<p>这个公式在 Triton 中反复出现（GeLU、LayerNorm 等都用得到），建议记住。</p>
+<hr />
+<h2 id="常见问题">8. 常见问题</h2>
+<p><strong>Q：为什么 <code>tl.exp(-x)</code> 不会溢出？</strong></p>
+<p>A：实际上可能会。当 <code>x</code> 是很大的负数时，<code>-x</code> 是很大的正数，<code>exp(-x)</code> 会溢出到 <code>inf</code>。 Triton 内部做了保护（返回 <code>inf</code> 而不是 NaN），但结果可能不正确。 这就是为什么 PyTorch 的 <code>silu</code> 内部可能有额外的数值保护代码。</p>
+<p><strong>Q：<code>tl.maximum</code> 和 <code>tl.where</code> 哪个更快？</strong></p>
+<p>A：性能基本相同，都是向量化操作，生成相似的 PTX 代码。 <code>tl.maximum</code> 更简洁，推荐优先使用。</p>
+<p><strong>Q：BLOCK_SIZE 为什么必须是 2 的幂？</strong></p>
+<p>A：Triton 编译器用 BLOCK_SIZE 生成 mask 和内存访问模式。 2 的幂让编译器可以高效地生成位运算（<code>offset &amp; (BLOCK_SIZE-1)</code> 等价于 <code>offset % BLOCK_SIZE</code>）。</p>
+<hr />
+<p><strong>运行本章代码：</strong> <code>python 02_elementwise.py</code> <strong>下一章：</strong> 第三章 — 行级聚合（Softmax, LayerNorm）</p>

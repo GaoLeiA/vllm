@@ -1,0 +1,412 @@
+<h1 id="第五章flashattention-forward-核心章节">第五章：FlashAttention Forward — 核心章节</h1>
+<blockquote>
+<p><strong>你将学到什么：</strong> - 理解标准 Attention 的 O(N²) 内存瓶颈 - 掌握 Online Softmax 的数学原理 - 实现完整的 FlashAttention Triton Kernel - 理解 Block Pointer 和 <code>tl.make_block_ptr</code> - 支持 Causal Masking</p>
+<p><strong>前置知识：</strong> 第二章（元素级）+ 第三章（行级聚合）+ 第四章（Tiling） <strong>预计时间：</strong> 90 分钟 <strong>最终成果：</strong> 一个通过 PyTorch 验证的 FlashAttention Triton Kernel</p>
+</blockquote>
+<hr />
+<h2 id="标准-attention-的问题">1. 标准 Attention 的问题</h2>
+<h3 id="标准-attention-的计算">1.1 标准 Attention 的计算</h3>
+<div class="sourceCode" id="cb1"><pre class="sourceCode python"><code class="sourceCode python"><span id="cb1-1"><a href="#cb1-1" aria-hidden="true"></a><span class="co"># Scaled Dot-Product Attention</span></span>
+<span id="cb1-2"><a href="#cb1-2" aria-hidden="true"></a>S <span class="op">=</span> Q <span class="op">@</span> K<span class="op">^</span>T <span class="op">/</span> sqrt(D)    <span class="co"># (B, H, N, N)  ← 这里!</span></span>
+<span id="cb1-3"><a href="#cb1-3" aria-hidden="true"></a>P <span class="op">=</span> softmax(S, dim<span class="op">=-</span><span class="dv">1</span>)    <span class="co"># (B, H, N, N)  ← 这里!</span></span>
+<span id="cb1-4"><a href="#cb1-4" aria-hidden="true"></a>O <span class="op">=</span> P <span class="op">@</span> V                 <span class="co"># (B, H, N, D)</span></span></code></pre></div>
+<h3 id="内存数字">1.2 内存数字</h3>
+<table>
+<thead>
+<tr class="header">
+<th>序列长度 N</th>
+<th>S 矩阵大小 (fp16)</th>
+<th>P 矩阵大小 (fp16)</th>
+<th>总计</th>
+</tr>
+</thead>
+<tbody>
+<tr class="odd">
+<td>1K</td>
+<td>2 MB</td>
+<td>2 MB</td>
+<td>4 MB</td>
+</tr>
+<tr class="even">
+<td>8K</td>
+<td>128 MB</td>
+<td>128 MB</td>
+<td>256 MB</td>
+</tr>
+<tr class="odd">
+<td>32K</td>
+<td>2 GB</td>
+<td>2 GB</td>
+<td>4 GB</td>
+</tr>
+<tr class="even">
+<td>128K</td>
+<td>32 GB</td>
+<td>32 GB</td>
+<td><strong>64 GB</strong></td>
+</tr>
+</tbody>
+</table>
+<p><strong>GPU 显存通常只有 24-80 GB。</strong> 当 N=128K 时，仅 Attention 矩阵就需要 64 GB！</p>
+<h3 id="flashattention-的核心洞察">1.3 FlashAttention 的核心洞察</h3>
+<blockquote>
+<p><strong>不存储完整的 N×N 矩阵，而是分块计算、即时丢弃。</strong></p>
+</blockquote>
+<pre><code>标准 Attention:    [全部 N×N 矩阵存在显存中]
+FlashAttention:    [每次只处理 64×64 小块，用完即丢]</code></pre>
+<p>内存复杂度从 <strong>O(N²)</strong> 降到 <strong>O(N)</strong>。</p>
+<hr />
+<h2 id="online-softmax-flashattention-的数学核心">2. Online Softmax — FlashAttention 的数学核心</h2>
+<h3 id="问题为什么不能分块算-softmax">2.1 问题：为什么不能分块算 Softmax？</h3>
+<p>标准 Softmax:</p>
+<pre><code>softmax(xᵢ) = exp(xᵢ) / Σⱼ exp(xⱼ)</code></pre>
+<p>分母 <code>Σⱼ exp(xⱼ)</code> 需要看到<strong>所有元素</strong>才能算。如果分块： - 第 1 块算到 <code>l₁ = Σᵢ₁ exp(xᵢ₁)</code> - 第 2 块算到 <code>l₂ = Σᵢ₂ exp(xᵢ₂)</code> - 但 <code>l = l₁ + l₂</code> 不对！因为<strong>每块的 exp 偏移不同</strong></p>
+<h3 id="online-softmax-的解决方案">2.2 Online Softmax 的解决方案</h3>
+<p>维护三个<strong>状态变量</strong>，每处理一个新块时更新：</p>
+<table>
+<thead>
+<tr class="header">
+<th>变量</th>
+<th>含义</th>
+<th>初始值</th>
+</tr>
+</thead>
+<tbody>
+<tr class="odd">
+<td><strong>M</strong> (max)</td>
+<td>已处理部分的最大值</td>
+<td><code>-inf</code></td>
+</tr>
+<tr class="even">
+<td><strong>L</strong> (sum)</td>
+<td>归一化因子 <code>Σexp(x-m)</code></td>
+<td><code>0</code></td>
+</tr>
+<tr class="odd">
+<td><strong>O</strong> (output)</td>
+<td>未归一化的输出 <code>ΣP·V</code></td>
+<td><code>0</code></td>
+</tr>
+</tbody>
+</table>
+<h3 id="更新公式最重要的一页">2.3 更新公式（最重要的一页！）</h3>
+<p>处理新块 <code>(S_block, V_block)</code> 时：</p>
+<pre><code>M_block = max(S_block, axis=1)             ← 当前块的 max
+M_new   = max(M_old, M_block)              ← 合并后的 max
+
+P_block = exp(S_block - M_block)           ← 安全 exp
+
+L_new   = exp(M_old - M_new) × L_old
+          + ΣP_block × exp(M_block - M_new)
+
+O_new   = exp(M_old - M_new) × O_old
+          + P_block @ V_block
+
+M = M_new, L = L_new, O = O_new</code></pre>
+<p>最终结果: <code>Output = O / L</code></p>
+<h3 id="图解一个直观的例子">2.4 图解：一个直观的例子</h3>
+<pre><code>一行数据: [1, 3, 2, 5, 4, 2], 分成两块 [1,3,2] 和 [5,4,2]
+
+第 1 轮: 处理 [1, 3, 2]
+  M = max(1,3,2) = 3
+  L = exp(1-3) + exp(3-3) + exp(2-3) = 0.135 + 1.0 + 0.368 = 1.503
+  O = P₁ @ V₁
+
+第 2 轮: 处理 [5, 4, 2]
+  M_block = max(5,4,2) = 5
+  M_new = max(3, 5) = 5              ← 发现更大值！
+
+  α₁ = exp(3 - 5) = 0.135            ← 旧结果缩小
+  α₂ = exp(3 - 5) = 0.135            ← 旧结果再缩小
+
+  L_new = 1.503 × 0.135 + (exp(0)+exp(-1)+exp(-3))
+        = 0.203 + (1.0 + 0.368 + 0.050) = 1.621
+
+  O_new = O × 0.135 + P₂ @ V₂
+
+最终: Output = O_new / L_new</code></pre>
+<p><strong>核心洞察：</strong> <code>exp(M_old - M_new)</code> 是“修正因子”。当新块有更大值时，之前的所有累加结果等比缩小，确保数值上和“一次性算完”完全一致。</p>
+<hr />
+<h2 id="block-pointer-triton-的内存访问利器">3. Block Pointer — Triton 的内存访问利器</h2>
+<h3 id="什么是-block-pointer">3.1 什么是 Block Pointer？</h3>
+<div class="sourceCode" id="cb6"><pre class="sourceCode python"><code class="sourceCode python"><span id="cb6-1"><a href="#cb6-1" aria-hidden="true"></a>Q_block_ptr <span class="op">=</span> tl.make_block_ptr(</span>
+<span id="cb6-2"><a href="#cb6-2" aria-hidden="true"></a>    base<span class="op">=</span>Q_ptr <span class="op">+</span> batch_id <span class="op">*</span> stride_qb,     <span class="co"># 起始地址</span></span>
+<span id="cb6-3"><a href="#cb6-3" aria-hidden="true"></a>    shape<span class="op">=</span>(Nq, D),                          <span class="co"># 完整形状</span></span>
+<span id="cb6-4"><a href="#cb6-4" aria-hidden="true"></a>    strides<span class="op">=</span>(stride_qn, stride_qd),         <span class="co"># 步幅</span></span>
+<span id="cb6-5"><a href="#cb6-5" aria-hidden="true"></a>    offsets<span class="op">=</span>(q_block_id <span class="op">*</span> Q_BLOCK, <span class="dv">0</span>),      <span class="co"># 当前偏移</span></span>
+<span id="cb6-6"><a href="#cb6-6" aria-hidden="true"></a>    block_shape<span class="op">=</span>(Q_BLOCK, D),               <span class="co"># 加载的形状</span></span>
+<span id="cb6-7"><a href="#cb6-7" aria-hidden="true"></a>    order<span class="op">=</span>(<span class="dv">1</span>, <span class="dv">0</span>),                           <span class="co"># 内存排序</span></span>
+<span id="cb6-8"><a href="#cb6-8" aria-hidden="true"></a>)</span></code></pre></div>
+<p><strong>类比：</strong> 像一个“可移动的取景框” — 你告诉 Triton 你要看哪个位置、多大的一块数据，Triton 负责高效地加载。</p>
+<h3 id="为什么用-block-pointer">3.2 为什么用 Block Pointer？</h3>
+<table>
+<thead>
+<tr class="header">
+<th>方式</th>
+<th>优点</th>
+<th>缺点</th>
+</tr>
+</thead>
+<tbody>
+<tr class="odd">
+<td>手动 offset</td>
+<td>灵活</td>
+<td>容易出错，无法优化</td>
+</tr>
+<tr class="even">
+<td><strong>Block Pointer</strong></td>
+<td>自动 memory coalescing</td>
+<td>需要理解参数</td>
+</tr>
+</tbody>
+</table>
+<p><strong>Memory Coalescing:</strong> 相邻线程访问连续内存地址时，GPU 可以一次加载多个元素。Block Pointer 让 Triton 自动做这个优化。</p>
+<h3 id="advance-移动指针">3.3 <code>advance()</code> — 移动指针</h3>
+<div class="sourceCode" id="cb7"><pre class="sourceCode python"><code class="sourceCode python"><span id="cb7-1"><a href="#cb7-1" aria-hidden="true"></a>K_block_ptr <span class="op">=</span> K_block_ptr.advance((K_BLOCK, <span class="dv">0</span>))</span></code></pre></div>
+<p><code>advance</code> 沿着指定方向移动指针。这里 <code>(K_BLOCK, 0)</code> 表示沿第 0 维（行）移动 K_BLOCK 个元素。</p>
+<p><strong>在循环中：</strong> 每次迭代 <code>advance</code> 一次，正好移动到下一个 KV block。</p>
+<hr />
+<h2 id="完整-kernel-实现">4. 完整 Kernel 实现</h2>
+<h3 id="kernel-签名">4.1 Kernel 签名</h3>
+<div class="sourceCode" id="cb8"><pre class="sourceCode python"><code class="sourceCode python"><span id="cb8-1"><a href="#cb8-1" aria-hidden="true"></a><span class="at">@triton.jit</span></span>
+<span id="cb8-2"><a href="#cb8-2" aria-hidden="true"></a><span class="kw">def</span> _flash_attn_fwd_kernel(</span>
+<span id="cb8-3"><a href="#cb8-3" aria-hidden="true"></a>    Q, K, V, O, L,           <span class="co"># 指针</span></span>
+<span id="cb8-4"><a href="#cb8-4" aria-hidden="true"></a>    <span class="co"># strides</span></span>
+<span id="cb8-5"><a href="#cb8-5" aria-hidden="true"></a>    stride_qb, stride_qn, stride_qd,</span>
+<span id="cb8-6"><a href="#cb8-6" aria-hidden="true"></a>    stride_kb, stride_kn, stride_kd,</span>
+<span id="cb8-7"><a href="#cb8-7" aria-hidden="true"></a>    stride_vb, stride_vn, stride_vd,</span>
+<span id="cb8-8"><a href="#cb8-8" aria-hidden="true"></a>    stride_ob, stride_on, stride_od,</span>
+<span id="cb8-9"><a href="#cb8-9" aria-hidden="true"></a>    stride_lb, stride_ln,</span>
+<span id="cb8-10"><a href="#cb8-10" aria-hidden="true"></a>    <span class="co"># 问题参数</span></span>
+<span id="cb8-11"><a href="#cb8-11" aria-hidden="true"></a>    Nq, Nk, D,</span>
+<span id="cb8-12"><a href="#cb8-12" aria-hidden="true"></a>    scale,</span>
+<span id="cb8-13"><a href="#cb8-13" aria-hidden="true"></a>    <span class="co"># 编译期常量</span></span>
+<span id="cb8-14"><a href="#cb8-14" aria-hidden="true"></a>    is_causal: tl.constexpr,</span>
+<span id="cb8-15"><a href="#cb8-15" aria-hidden="true"></a>    Q_BLOCK: tl.constexpr,</span>
+<span id="cb8-16"><a href="#cb8-16" aria-hidden="true"></a>    K_BLOCK: tl.constexpr,</span>
+<span id="cb8-17"><a href="#cb8-17" aria-hidden="true"></a>):</span></code></pre></div>
+<p><strong>参数分类：</strong> - <strong>运行时参数：</strong> 每个 kernel launch 都可以不同（Q, K, V 等） - <strong>constexpr 参数：</strong> 编译期确定，用于代码生成（Q_BLOCK, K_BLOCK, is_causal）</p>
+<h3 id="完整代码">4.2 完整代码</h3>
+<p>完整代码见 <code>05_flash_attention.py</code> 中的 <code>_flash_attn_fwd_kernel</code> 函数。</p>
+<p>以下是<strong>关键步骤的对照表</strong>：</p>
+<table>
+<thead>
+<tr class="header">
+<th>步骤</th>
+<th>代码片段</th>
+<th>说明</th>
+</tr>
+</thead>
+<tbody>
+<tr class="odd">
+<td>1. 确定线程块</td>
+<td><code>pid = program_id(0), batch_id = program_id(1)</code></td>
+<td>每线程块处理一个 Q block</td>
+</tr>
+<tr class="even">
+<td>2. 构造 block ptrs</td>
+<td><code>tl.make_block_ptr(...)</code></td>
+<td>Q, K, V, O, L 各一个</td>
+</tr>
+<tr class="odd">
+<td>3. 加载 Q block</td>
+<td><code>Q_i = tl.load(Q_block_ptr)</code></td>
+<td>一次性加载 (Q_BLOCK, D)</td>
+</tr>
+<tr class="even">
+<td>4. 初始化状态</td>
+<td><code>M=-inf, L=0, O=0</code></td>
+<td>Online Softmax 初始状态</td>
+</tr>
+<tr class="odd">
+<td>5. 遍历 KV blocks</td>
+<td><code>for k_block_id in range(cdiv(Nk, K_BLOCK))</code></td>
+<td>内层循环</td>
+</tr>
+<tr class="even">
+<td>5a. 加载 K,V</td>
+<td><code>K_j = tl.load(K_block_ptr)</code></td>
+<td>每次加载 (K_BLOCK, D)</td>
+</tr>
+<tr class="odd">
+<td>5b. 算 S</td>
+<td><code>S = tl.dot(Q_i, K_j.T) * scale</code></td>
+<td>Q_BLOCK × K_BLOCK 小矩阵</td>
+</tr>
+<tr class="even">
+<td>5c. Causal mask</td>
+<td><code>if is_causal: S = where(mask, S, -1e6)</code></td>
+<td>编译期 if</td>
+</tr>
+<tr class="odd">
+<td>5d. Online Softmax</td>
+<td><code>M_new = max(M, M_block)</code> 等</td>
+<td>更新三个状态</td>
+</tr>
+<tr class="even">
+<td>5e. 更新 O</td>
+<td><code>O_new = α × O_old + P @ V</code></td>
+<td>累加加权输出</td>
+</tr>
+<tr class="odd">
+<td>5f. 移动指针</td>
+<td><code>K_block_ptr.advance((K_BLOCK, 0))</code></td>
+<td>准备下一轮</td>
+</tr>
+<tr class="even">
+<td>6. 归一化</td>
+<td><code>O = O / L</code></td>
+<td>最终输出</td>
+</tr>
+<tr class="odd">
+<td>7. 写回</td>
+<td><code>tl.store(O_block_ptr, O)</code></td>
+<td>写回 HBM</td>
+</tr>
+</tbody>
+</table>
+<h3 id="causal-mask-的实现">4.3 Causal Mask 的实现</h3>
+<div class="sourceCode" id="cb9"><pre class="sourceCode python"><code class="sourceCode python"><span id="cb9-1"><a href="#cb9-1" aria-hidden="true"></a><span class="cf">if</span> is_causal:</span>
+<span id="cb9-2"><a href="#cb9-2" aria-hidden="true"></a>    q_idx <span class="op">=</span> q_block_id <span class="op">*</span> Q_BLOCK <span class="op">+</span> tl.arange(<span class="dv">0</span>, Q_BLOCK)[:, <span class="va">None</span>]</span>
+<span id="cb9-3"><a href="#cb9-3" aria-hidden="true"></a>    k_idx <span class="op">=</span> k_block_id <span class="op">*</span> K_BLOCK <span class="op">+</span> tl.arange(<span class="dv">0</span>, K_BLOCK)[<span class="va">None</span>, :]</span>
+<span id="cb9-4"><a href="#cb9-4" aria-hidden="true"></a>    causal_mask <span class="op">=</span> q_idx <span class="op">&gt;=</span> k_idx</span>
+<span id="cb9-5"><a href="#cb9-5" aria-hidden="true"></a>    S_ij <span class="op">=</span> tl.where(causal_mask, S_ij, <span class="op">-</span><span class="fl">1e6</span>)</span></code></pre></div>
+<p><strong>原理：</strong> - <code>q_idx</code> 形状 <code>(Q_BLOCK, 1)</code> — 每行一个 Query 位置 - <code>k_idx</code> 形状 <code>(1, K_BLOCK)</code> — 每列一个 Key 位置 - <code>q_idx &gt;= k_idx</code> 形状 <code>(Q_BLOCK, K_BLOCK)</code> — 下三角为 True - <code>tl.where(mask, S, -1e6)</code> — 非下三角位置设为 -inf</p>
+<p><strong>为什么是 <code>-1e6</code> 而不是 <code>-inf</code>？</strong> - <code>-inf</code> 在 fp16 中可能导致 NaN - <code>-1e6</code> 的 <code>exp(-1e6) ≈ 0</code>，效果等同于 -inf - 更安全</p>
+<hr />
+<h2 id="pytorch-wrapper">5. PyTorch Wrapper</h2>
+<h3 id="使用-torch.autograd.function">5.1 使用 <code>torch.autograd.Function</code></h3>
+<div class="sourceCode" id="cb10"><pre class="sourceCode python"><code class="sourceCode python"><span id="cb10-1"><a href="#cb10-1" aria-hidden="true"></a><span class="kw">class</span> FlashAttentionTriton(torch.autograd.Function):</span>
+<span id="cb10-2"><a href="#cb10-2" aria-hidden="true"></a>    <span class="at">@staticmethod</span></span>
+<span id="cb10-3"><a href="#cb10-3" aria-hidden="true"></a>    <span class="kw">def</span> forward(ctx, Q, K, V, is_causal<span class="op">=</span><span class="va">False</span>):</span>
+<span id="cb10-4"><a href="#cb10-4" aria-hidden="true"></a>        B, Nq, D <span class="op">=</span> Q.shape</span>
+<span id="cb10-5"><a href="#cb10-5" aria-hidden="true"></a>        Nk <span class="op">=</span> K.shape[<span class="dv">1</span>]</span>
+<span id="cb10-6"><a href="#cb10-6" aria-hidden="true"></a></span>
+<span id="cb10-7"><a href="#cb10-7" aria-hidden="true"></a>        Q_BLOCK <span class="op">=</span> <span class="dv">64</span></span>
+<span id="cb10-8"><a href="#cb10-8" aria-hidden="true"></a>        K_BLOCK <span class="op">=</span> <span class="dv">64</span></span>
+<span id="cb10-9"><a href="#cb10-9" aria-hidden="true"></a>        scale <span class="op">=</span> D <span class="op">**</span> <span class="op">-</span><span class="fl">0.5</span></span>
+<span id="cb10-10"><a href="#cb10-10" aria-hidden="true"></a></span>
+<span id="cb10-11"><a href="#cb10-11" aria-hidden="true"></a>        O <span class="op">=</span> torch.empty_like(Q)</span>
+<span id="cb10-12"><a href="#cb10-12" aria-hidden="true"></a>        L <span class="op">=</span> torch.empty(B, Nq, device<span class="op">=</span>Q.device)</span>
+<span id="cb10-13"><a href="#cb10-13" aria-hidden="true"></a></span>
+<span id="cb10-14"><a href="#cb10-14" aria-hidden="true"></a>        grid <span class="op">=</span> (triton.cdiv(Nq, Q_BLOCK), B)</span>
+<span id="cb10-15"><a href="#cb10-15" aria-hidden="true"></a></span>
+<span id="cb10-16"><a href="#cb10-16" aria-hidden="true"></a>        _flash_attn_fwd_kernel[grid](</span>
+<span id="cb10-17"><a href="#cb10-17" aria-hidden="true"></a>            Q, K, V, O, L,</span>
+<span id="cb10-18"><a href="#cb10-18" aria-hidden="true"></a>            Q.stride(<span class="dv">0</span>), Q.stride(<span class="dv">1</span>), Q.stride(<span class="dv">2</span>),</span>
+<span id="cb10-19"><a href="#cb10-19" aria-hidden="true"></a>            ...</span>
+<span id="cb10-20"><a href="#cb10-20" aria-hidden="true"></a>            D<span class="op">=</span>D, Q_BLOCK<span class="op">=</span>Q_BLOCK, K_BLOCK<span class="op">=</span>K_BLOCK, is_causal<span class="op">=</span>is_causal,</span>
+<span id="cb10-21"><a href="#cb10-21" aria-hidden="true"></a>        )</span>
+<span id="cb10-22"><a href="#cb10-22" aria-hidden="true"></a></span>
+<span id="cb10-23"><a href="#cb10-23" aria-hidden="true"></a>        <span class="cf">return</span> O</span></code></pre></div>
+<h3 id="grid-配置">5.2 Grid 配置</h3>
+<div class="sourceCode" id="cb11"><pre class="sourceCode python"><code class="sourceCode python"><span id="cb11-1"><a href="#cb11-1" aria-hidden="true"></a>grid <span class="op">=</span> (triton.cdiv(Nq, Q_BLOCK), B)</span></code></pre></div>
+<ul>
+<li>第 0 维：<code>Nq / Q_BLOCK</code> 个 Q block</li>
+<li>第 1 维：<code>B</code> 个 batch</li>
+</ul>
+<p><strong>总共启动的 kernel 数：</strong> <code>ceil(Nq / Q_BLOCK) × B</code></p>
+<p><strong>经验法则：</strong> 启动的 kernel 数 ≥ 4 × SM 数</p>
+<div class="sourceCode" id="cb12"><pre class="sourceCode python"><code class="sourceCode python"><span id="cb12-1"><a href="#cb12-1" aria-hidden="true"></a><span class="co"># H100: 132 SM → 至少 528 个 kernel</span></span>
+<span id="cb12-2"><a href="#cb12-2" aria-hidden="true"></a><span class="co"># 如果 Nq=128, Q_BLOCK=64, B=4 → 2×4 = 8 个 kernel ❌</span></span>
+<span id="cb12-3"><a href="#cb12-3" aria-hidden="true"></a><span class="co"># 如果 Nq=2048, Q_BLOCK=64, B=4 → 32×4 = 128 个 kernel ⚠️</span></span>
+<span id="cb12-4"><a href="#cb12-4" aria-hidden="true"></a><span class="co"># 如果 Nq=2048, Q_BLOCK=64, B=16 → 32×16 = 512 个 kernel ✅</span></span></code></pre></div>
+<hr />
+<h2 id="验证正确性">6. 验证正确性</h2>
+<h3 id="对比-pytorch">6.1 对比 PyTorch</h3>
+<div class="sourceCode" id="cb13"><pre class="sourceCode python"><code class="sourceCode python"><span id="cb13-1"><a href="#cb13-1" aria-hidden="true"></a>Q <span class="op">=</span> torch.randn(B, N, D, device<span class="op">=</span><span class="st">&quot;cuda&quot;</span>, dtype<span class="op">=</span>torch.float16)</span>
+<span id="cb13-2"><a href="#cb13-2" aria-hidden="true"></a>K <span class="op">=</span> torch.randn(B, N, D, device<span class="op">=</span><span class="st">&quot;cuda&quot;</span>, dtype<span class="op">=</span>torch.float16)</span>
+<span id="cb13-3"><a href="#cb13-3" aria-hidden="true"></a>V <span class="op">=</span> torch.randn(B, N, D, device<span class="op">=</span><span class="st">&quot;cuda&quot;</span>, dtype<span class="op">=</span>torch.float16)</span>
+<span id="cb13-4"><a href="#cb13-4" aria-hidden="true"></a></span>
+<span id="cb13-5"><a href="#cb13-5" aria-hidden="true"></a><span class="co"># PyTorch 参考</span></span>
+<span id="cb13-6"><a href="#cb13-6" aria-hidden="true"></a>o_torch <span class="op">=</span> torch.nn.functional.scaled_dot_product_attention(Q, K, V)</span>
+<span id="cb13-7"><a href="#cb13-7" aria-hidden="true"></a></span>
+<span id="cb13-8"><a href="#cb13-8" aria-hidden="true"></a><span class="co"># Triton 实现</span></span>
+<span id="cb13-9"><a href="#cb13-9" aria-hidden="true"></a>o_triton <span class="op">=</span> FlashAttentionTriton.<span class="bu">apply</span>(Q, K, V, is_causal<span class="op">=</span><span class="va">False</span>)</span>
+<span id="cb13-10"><a href="#cb13-10" aria-hidden="true"></a></span>
+<span id="cb13-11"><a href="#cb13-11" aria-hidden="true"></a><span class="co"># 对比</span></span>
+<span id="cb13-12"><a href="#cb13-12" aria-hidden="true"></a>diff <span class="op">=</span> (o_torch.<span class="bu">float</span>() <span class="op">-</span> o_triton.<span class="bu">float</span>()).<span class="bu">abs</span>().<span class="bu">max</span>().item()</span>
+<span id="cb13-13"><a href="#cb13-13" aria-hidden="true"></a><span class="bu">print</span>(<span class="ss">f&quot;max diff: </span><span class="sc">{</span>diff<span class="sc">:.4e}</span><span class="ss">&quot;</span>)</span></code></pre></div>
+<h3 id="预期误差">6.2 预期误差</h3>
+<pre><code>N=128, D=64:  max_diff ~ 0.1 ~ 1.0  (fp16 精度限制)
+N=256, D=128: max_diff ~ 0.5 ~ 2.0
+N=512, D=64:  max_diff ~ 1.0 ~ 5.0  (误差随 N 增大)</code></pre>
+<p><strong>误差来源：</strong> 1. FP16 精度（只有 ~3 位有效数字） 2. Online Softmax 的累积误差（多轮 <code>exp(M_old - M_new)</code> 乘法） 3. Triton 的 <code>tl.dot</code> 实现精度</p>
+<p><strong><code>max_diff &lt; 10</code> 通常可以接受。</strong></p>
+<hr />
+<h2 id="思考题">7. 思考题</h2>
+<h3 id="q1为什么-q-在循环外加载一次而-kv-在循环内加载">Q1：为什么 Q 在循环外加载一次，而 KV 在循环内加载？</h3>
+<p>A：Q 的大小是 <code>Q_BLOCK × D</code>，K/V 每次加载的大小是 <code>K_BLOCK × D</code>。 Q 只需要一次（因为每个 KV block 都要和同一个 Q 做 dot），而 KV 需要遍历所有块。 这减少了 Q 的显存读取次数。</p>
+<h3 id="q2为什么-l_block_ptr-的形状是-nq-1-而不是-nq-d">Q2：为什么 <code>L_block_ptr</code> 的形状是 <code>(Nq, 1)</code> 而不是 <code>(Nq, D)</code>？</h3>
+<p>A：L 是每行的归一化因子，每行只有<strong>一个值</strong>（所有 D 维共享同一个 L）。 所以形状是 <code>(Nq, 1)</code>，不需要 D 维。</p>
+<h3 id="q3m_block-为什么用-m_block-而不是-m_new-来计算-p_ij">Q3：<code>M_block</code> 为什么用 <code>M_block</code> 而不是 <code>M_new</code> 来计算 <code>P_ij</code>？</h3>
+<p>A：这是最容易搞错的地方！ - <code>P_ij = exp(S_ij - M_block)</code> — 当前块的 softmax，用当前块 max 偏移 - 后续更新 <code>L_new</code> 时，用 <code>M_new</code> 做全局修正</p>
+<p>如果直接用 <code>M_new</code>：</p>
+<pre><code>P_ij_wrong = exp(S_ij - M_new)</code></pre>
+<p>当 <code>M_new &gt; M_block</code> 时，<code>exp(S_ij - M_new)</code> 会更小，导致 P 不正确。</p>
+<p>正确的做法是：先用 <code>M_block</code> 偏移得到正确的 <code>P_ij</code>，再用 <code>M_new</code> 修正 <code>L_acc</code> 和 <code>O_acc</code>。</p>
+<h3 id="q4tl.make_block_ptr-的-order1-0-是什么意思">Q4：tl.make_block_ptr 的 order=(1, 0) 是什么意思？</h3>
+<p>A：这告诉 Triton 内存布局的排序。 - <code>(1, 0)</code> 表示第 0 维（行）stride 对应顺序 1，第 1 维（列）stride 对应顺序 0 - 这让 Triton 能做更高效的 coalesced access - 对于行主序的 PyTorch tensor，<code>order=(1, 0)</code> 是正确的</p>
+<hr />
+<h2 id="常见错误排查">8. 常见错误排查</h2>
+<table>
+<colgroup>
+<col style="width: 33%" />
+<col style="width: 33%" />
+<col style="width: 33%" />
+</colgroup>
+<thead>
+<tr class="header">
+<th>错误</th>
+<th>原因</th>
+<th>修复</th>
+</tr>
+</thead>
+<tbody>
+<tr class="odd">
+<td>输出全是 NaN</td>
+<td><code>M</code> 初始值不是 <code>-inf</code></td>
+<td>改为 <code>tl.full((Q_BLOCK, 1), float("-inf"), ...)</code></td>
+</tr>
+<tr class="even">
+<td>误差很大 (&gt;10)</td>
+<td><code>alpha</code> 计算顺序反了</td>
+<td>确认 <code>M_acc - M_new</code> 不是 <code>M_new - M_acc</code></td>
+</tr>
+<tr class="odd">
+<td>causal 结果不对</td>
+<td>mask 方向反了</td>
+<td><code>q_idx &gt;= k_idx</code> 不是 <code>q_idx &lt;= k_idx</code></td>
+</tr>
+<tr class="even">
+<td>shape mismatch</td>
+<td>strides 传错了</td>
+<td>用 <code>tensor.stride(0), tensor.stride(1), tensor.stride(2)</code></td>
+</tr>
+<tr class="odd">
+<td>kernel 不启动</td>
+<td>grid 配置错误</td>
+<td>确认 <code>cdiv(Nq, Q_BLOCK)</code> 不是 <code>Nq // Q_BLOCK</code></td>
+</tr>
+</tbody>
+</table>
+<hr />
+<h2 id="核心公式速查">9. 核心公式速查</h2>
+<pre><code>FlashAttention Forward (每轮 KV block):
+
+  S = Q @ K^T / √D                    # 小矩阵
+  M_block = max(S, axis=1)              # 当前块 max
+  M_new = max(M_acc, M_block)           # 合并 max
+
+  P = exp(S - M_block)                  # 安全 exp
+  L_new = exp(M_acc-M_new)·L + sum(P)·exp(M_block-M_new)
+  O_new = exp(M_acc-M_new)·O + P @ V
+
+  M_acc = M_new, L_acc = L_new, O_acc = O_new
+
+最终: Output = O_acc / L_acc</code></pre>
+<hr />
+<h2 id="下一步">10. 下一步</h2>
+<p>本章是整个教程的核心。恭喜你完成了 FlashAttention 的 Triton 实现！</p>
+<p>下一章（第六章）我们将实现 <strong>Backward Pass</strong>，包括： - Recomputation 策略（不保存 P，反向时重新计算） - 梯度公式的 Triton 实现</p>
+<p><strong>运行本章代码：</strong> <code>python 05_flash_attention.py</code> <strong>下一章：</strong> 第六章 — FlashAttention Backward</p>

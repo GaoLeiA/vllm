@@ -1,0 +1,108 @@
+<h1 id="triton-从零开始教程">Triton 从零开始教程</h1>
+<p>一套循序渐进的动手教程，帮助你从零开始掌握 <a href="https://github.com/triton-lang/triton">Triton</a> GPU 编程。</p>
+<h2 id="目录">目录</h2>
+<p>每一章包含 <strong>教程文档 (<code>.md</code>)</strong> + <strong>可运行代码 (<code>.py</code>)</strong>，建议先读教程再跑代码。</p>
+<table>
+<thead>
+<tr class="header">
+<th>章节</th>
+<th>教程</th>
+<th>代码</th>
+<th>内容</th>
+<th>预计时间</th>
+</tr>
+</thead>
+<tbody>
+<tr class="odd">
+<td>1</td>
+<td><a href="01_introduction_tutorial.md">教程</a></td>
+<td><a href="01_introduction.py">代码</a></td>
+<td>Hello World, Grid/Block/Thread, tl.load/store</td>
+<td>30 min</td>
+</tr>
+<tr class="even">
+<td>2</td>
+<td><a href="02_elementwise_tutorial.md">教程</a></td>
+<td><a href="02_elementwise.py">代码</a></td>
+<td>ReLU, Silu, GeLU, 性能对比</td>
+<td>45 min</td>
+</tr>
+<tr class="odd">
+<td>3</td>
+<td><a href="03_softmax_tutorial.md">教程</a></td>
+<td><a href="03_softmax.py">代码</a></td>
+<td>Softmax, LayerNorm, 行级聚合</td>
+<td>45 min</td>
+</tr>
+<tr class="even">
+<td>4</td>
+<td><a href="04_matmul_tutorial.md">教程</a></td>
+<td><a href="04_matmul.py">代码</a></td>
+<td>矩阵乘法 Tiling, tl.dot</td>
+<td>60 min</td>
+</tr>
+<tr class="odd">
+<td>5</td>
+<td><a href="05_flash_attention_tutorial.md">教程</a></td>
+<td><a href="05_flash_attention.py">代码</a></td>
+<td><strong>FlashAttention Forward</strong> (完整 Triton Kernel)</td>
+<td>90 min</td>
+</tr>
+<tr class="even">
+<td>6</td>
+<td><a href="06_backward_tutorial.md">教程</a></td>
+<td><a href="06_backward.py">代码</a></td>
+<td>FlashAttention Backward, Recomputation</td>
+<td>60 min</td>
+</tr>
+<tr class="odd">
+<td>7</td>
+<td><a href="07_reference_tutorial.md">教程</a></td>
+<td><a href="07_reference.py">代码</a></td>
+<td>速查表, 性能优化, 调试技巧, 学习路径</td>
+<td>参考</td>
+</tr>
+</tbody>
+</table>
+<h2 id="前置要求">前置要求</h2>
+<ul>
+<li>Python 3.10+</li>
+<li>PyTorch (与你的 CUDA 版本匹配)</li>
+<li>Triton</li>
+<li>GPU (NVIDIA, 建议显存 &gt;= 8GB)</li>
+</ul>
+<h2 id="运行方式">运行方式</h2>
+<div class="sourceCode" id="cb1"><pre class="sourceCode bash"><code class="sourceCode bash"><span id="cb1-1"><a href="#cb1-1" aria-hidden="true"></a><span class="bu">cd</span> triton_tutorial</span>
+<span id="cb1-2"><a href="#cb1-2" aria-hidden="true"></a></span>
+<span id="cb1-3"><a href="#cb1-3" aria-hidden="true"></a><span class="co"># 逐章: 先读 .md 教程, 再跑 .py 代码</span></span>
+<span id="cb1-4"><a href="#cb1-4" aria-hidden="true"></a><span class="ex">python</span> 01_introduction.py</span>
+<span id="cb1-5"><a href="#cb1-5" aria-hidden="true"></a><span class="ex">python</span> 02_elementwise.py</span>
+<span id="cb1-6"><a href="#cb1-6" aria-hidden="true"></a><span class="ex">python</span> 03_softmax.py</span>
+<span id="cb1-7"><a href="#cb1-7" aria-hidden="true"></a><span class="ex">python</span> 04_matmul.py</span>
+<span id="cb1-8"><a href="#cb1-8" aria-hidden="true"></a><span class="ex">python</span> 05_flash_attention.py</span>
+<span id="cb1-9"><a href="#cb1-9" aria-hidden="true"></a><span class="ex">python</span> 06_backward.py</span>
+<span id="cb1-10"><a href="#cb1-10" aria-hidden="true"></a><span class="ex">python</span> 07_reference.py</span></code></pre></div>
+<h2 id="学习建议">学习建议</h2>
+<ol type="1">
+<li><strong>不要跳章</strong> — 每一章都建立在前一章的基础上</li>
+<li><strong>先读教程再跑代码</strong> — 理解原理后再看实现</li>
+<li><strong>修改参数</strong> — 改变 BLOCK_SIZE、序列长度等，观察效果</li>
+<li><strong>做练习</strong> — 每章都有动手练习和思考题（教程中标记了 <code>练习</code>）</li>
+<li><strong>跑测试</strong> — 每章代码末尾都有验证测试</li>
+</ol>
+<h2 id="配套资料">配套资料</h2>
+<p>本教程基于 Stanford CS336 (Language Modeling from Scratch) 课程内容，主要参考:</p>
+<ul>
+<li>Lecture 6 (GPU 高性能编程)</li>
+<li>Assignment 2 (Systems — Triton kernel 实现)</li>
+<li><a href="https://arxiv.org/abs/2205.14135">FlashAttention 论文</a></li>
+<li><a href="https://triton-lang.org/main/getting-started/tutorials/">Triton 官方教程</a></li>
+</ul>
+<h2 id="进阶">进阶</h2>
+<p>完成本教程后，你可以:</p>
+<ol type="1">
+<li>完成 <a href="../assignment2-systems/">Assignment 2</a> 中的 Triton 练习</li>
+<li>阅读 <a href="https://arxiv.org/abs/2307.08691">FlashAttention-2 论文</a> 并实现优化版</li>
+<li>参与 vLLM 的 kernel 优化工作</li>
+<li>阅读 Triton 源码理解编译器实现</li>
+</ol>

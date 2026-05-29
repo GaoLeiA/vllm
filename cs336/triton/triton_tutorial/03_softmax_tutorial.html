@@ -1,0 +1,272 @@
+<h1 id="第三章行级聚合操作-softmax-和-layernorm">第三章：行级聚合操作 — Softmax 和 LayerNorm</h1>
+<blockquote>
+<p><strong>你将学到什么：</strong> - 理解“一个 Block 处理一行”的编程模式 - 实现 Triton Softmax kernel（两遍扫描） - 理解数值稳定性的问题（为什么减 max） - 实现 LayerNorm kernel - 理解 <code>tl.max()</code>, <code>tl.sum()</code> 的 axis 参数</p>
+<p><strong>前置知识：</strong> 第二章（元素级操作模板） <strong>预计时间：</strong> 45 分钟 <strong>最终成果：</strong> Triton Softmax + LayerNorm kernel</p>
+</blockquote>
+<hr />
+<h2 id="元素级操作-vs-聚合操作">1. 元素级操作 vs 聚合操作</h2>
+<h3 id="回顾元素级操作">1.1 回顾：元素级操作</h3>
+<pre><code>输入: [1, 2, 3, 4, 5]    每个元素独立
+输出: [2, 3, 4, 5, 6]    ReLU 或 x+1，每个结果只依赖自己的输入</code></pre>
+<h3 id="新的类型聚合操作">1.2 新的类型：聚合操作</h3>
+<pre><code>输入: [1, 2, 3, 4, 5]    每个结果依赖整行
+输出: [0.01, 0.03, 0.08, 0.23, 0.66]   Softmax，需要看到所有元素才能计算</code></pre>
+<p><strong>聚合操作的难点：</strong> 你必须先遍历整行，找到一些统计量（max、sum），然后才能计算最终结果。这意味着<strong>至少两遍扫描</strong>。</p>
+<h3 id="三种聚合操作的对比">1.3 三种聚合操作的对比</h3>
+<table>
+<thead>
+<tr class="header">
+<th>操作</th>
+<th>需要什么统计量</th>
+<th>几遍扫描</th>
+</tr>
+</thead>
+<tbody>
+<tr class="odd">
+<td><strong>Softmax</strong></td>
+<td>max, sum</td>
+<td>2 遍（找 max → 归一化）</td>
+</tr>
+<tr class="even">
+<td><strong>LayerNorm</strong></td>
+<td>mean, var</td>
+<td>2 遍（找 mean/var → normalize）</td>
+</tr>
+<tr class="odd">
+<td><strong>LayerSum</strong></td>
+<td>sum</td>
+<td>1 遍</td>
+</tr>
+</tbody>
+</table>
+<hr />
+<h2 id="softmax-两遍扫描的典型">2. Softmax — 两遍扫描的典型</h2>
+<h3 id="标准-softmax-公式">2.1 标准 Softmax 公式</h3>
+<pre><code>softmax(xᵢ) = exp(xᵢ) / Σⱼ exp(xⱼ)</code></pre>
+<p>问题在于<strong>分母</strong>：你必须先知道所有 <code>exp(xⱼ)</code> 的和，才能算任何一个 <code>softmax(xᵢ)</code>。</p>
+<h3 id="数值稳定性问题">2.2 数值稳定性问题</h3>
+<div class="sourceCode" id="cb4"><pre class="sourceCode python"><code class="sourceCode python"><span id="cb4-1"><a href="#cb4-1" aria-hidden="true"></a>x <span class="op">=</span> [<span class="dv">100</span>, <span class="dv">101</span>, <span class="dv">102</span>]</span>
+<span id="cb4-2"><a href="#cb4-2" aria-hidden="true"></a>exp(x) <span class="op">=</span> [<span class="fl">2.7e43</span>, <span class="fl">7.4e43</span>, <span class="fl">2.0e44</span>]  <span class="co"># 接近浮点数上限</span></span>
+<span id="cb4-3"><a href="#cb4-3" aria-hidden="true"></a>exp(x).<span class="bu">sum</span>() <span class="op">=</span> <span class="fl">3.0e44</span>               <span class="co"># 可能溢出!</span></span></code></pre></div>
+<p><strong>解决方案：减去每行的最大值</strong></p>
+<pre><code>softmax(xᵢ) = exp(xᵢ - max(x)) / Σⱼ exp(xⱼ - max(x))</code></pre>
+<p>减同一个值不影响结果，但让最大的 exp 变成 exp(0)=1，避免溢出。</p>
+<pre><code>x = [100, 101, 102], max = 102
+x - max = [-2, -1, 0]
+exp(x - max) = [0.135, 0.368, 1.0]  ← 全在安全范围内</code></pre>
+<h3 id="triton-实现两遍扫描">2.3 Triton 实现（两遍扫描）</h3>
+<div class="sourceCode" id="cb7"><pre class="sourceCode python"><code class="sourceCode python"><span id="cb7-1"><a href="#cb7-1" aria-hidden="true"></a><span class="at">@triton.jit</span></span>
+<span id="cb7-2"><a href="#cb7-2" aria-hidden="true"></a><span class="kw">def</span> softmax_kernel(x_ptr, y_ptr, x_row_stride, y_row_stride, num_cols, BLOCK_SIZE: tl.constexpr):</span>
+<span id="cb7-3"><a href="#cb7-3" aria-hidden="true"></a>    row_idx <span class="op">=</span> tl.program_id(axis<span class="op">=</span><span class="dv">0</span>)      <span class="co"># ← 当前处理第几行</span></span>
+<span id="cb7-4"><a href="#cb7-4" aria-hidden="true"></a>    col_offsets <span class="op">=</span> tl.arange(<span class="dv">0</span>, BLOCK_SIZE)  <span class="co"># ← 所有列的偏移</span></span>
+<span id="cb7-5"><a href="#cb7-5" aria-hidden="true"></a></span>
+<span id="cb7-6"><a href="#cb7-6" aria-hidden="true"></a>    <span class="co"># 1. 定位到这一行的起始指针</span></span>
+<span id="cb7-7"><a href="#cb7-7" aria-hidden="true"></a>    row_start <span class="op">=</span> x_ptr <span class="op">+</span> row_idx <span class="op">*</span> x_row_stride</span>
+<span id="cb7-8"><a href="#cb7-8" aria-hidden="true"></a></span>
+<span id="cb7-9"><a href="#cb7-9" aria-hidden="true"></a>    <span class="co"># 2. 加载整行 (带 mask)</span></span>
+<span id="cb7-10"><a href="#cb7-10" aria-hidden="true"></a>    x_row <span class="op">=</span> tl.load(row_start <span class="op">+</span> col_offsets,</span>
+<span id="cb7-11"><a href="#cb7-11" aria-hidden="true"></a>                    mask<span class="op">=</span>col_offsets <span class="op">&lt;</span> num_cols,</span>
+<span id="cb7-12"><a href="#cb7-12" aria-hidden="true"></a>                    other<span class="op">=</span><span class="bu">float</span>(<span class="st">&quot;-inf&quot;</span>))</span>
+<span id="cb7-13"><a href="#cb7-13" aria-hidden="true"></a></span>
+<span id="cb7-14"><a href="#cb7-14" aria-hidden="true"></a>    <span class="co"># 第1遍扫描：找 max（数值稳定）</span></span>
+<span id="cb7-15"><a href="#cb7-15" aria-hidden="true"></a>    x_max <span class="op">=</span> tl.<span class="bu">max</span>(x_row, axis<span class="op">=</span><span class="dv">0</span>)</span>
+<span id="cb7-16"><a href="#cb7-16" aria-hidden="true"></a>    x_row <span class="op">=</span> x_row <span class="op">-</span> x_max                <span class="co"># 减去 max</span></span>
+<span id="cb7-17"><a href="#cb7-17" aria-hidden="true"></a></span>
+<span id="cb7-18"><a href="#cb7-18" aria-hidden="true"></a>    <span class="co"># 第2遍扫描：exp, sum, normalize</span></span>
+<span id="cb7-19"><a href="#cb7-19" aria-hidden="true"></a>    numerator <span class="op">=</span> tl.exp(x_row)</span>
+<span id="cb7-20"><a href="#cb7-20" aria-hidden="true"></a>    denominator <span class="op">=</span> tl.<span class="bu">sum</span>(numerator, axis<span class="op">=</span><span class="dv">0</span>)</span>
+<span id="cb7-21"><a href="#cb7-21" aria-hidden="true"></a>    y_row <span class="op">=</span> numerator <span class="op">/</span> denominator</span>
+<span id="cb7-22"><a href="#cb7-22" aria-hidden="true"></a></span>
+<span id="cb7-23"><a href="#cb7-23" aria-hidden="true"></a>    <span class="co"># 3. 写回</span></span>
+<span id="cb7-24"><a href="#cb7-24" aria-hidden="true"></a>    y_row_start <span class="op">=</span> y_ptr <span class="op">+</span> row_idx <span class="op">*</span> y_row_stride</span>
+<span id="cb7-25"><a href="#cb7-25" aria-hidden="true"></a>    tl.store(y_row_start <span class="op">+</span> col_offsets, y_row,</span>
+<span id="cb7-26"><a href="#cb7-26" aria-hidden="true"></a>             mask<span class="op">=</span>col_offsets <span class="op">&lt;</span> num_cols)</span></code></pre></div>
+<h3 id="关键-apitl.maxx-axis0-和-tl.sumx-axis0">2.4 关键 API：<code>tl.max(x, axis=0)</code> 和 <code>tl.sum(x, axis=0)</code></h3>
+<pre><code>tl.max(x_row, axis=0)  → 把一行的所有元素聚合成一个标量 (max)
+tl.sum(x_row, axis=0)  → 把一行的所有元素聚合成一个标量 (sum)</code></pre>
+<p><code>axis=0</code> 表示<strong>沿着这个向量的方向聚合</strong>，结果是标量。</p>
+<h3 id="grid-配置">2.5 Grid 配置</h3>
+<div class="sourceCode" id="cb9"><pre class="sourceCode python"><code class="sourceCode python"><span id="cb9-1"><a href="#cb9-1" aria-hidden="true"></a><span class="co"># (M, N) 的矩阵</span></span>
+<span id="cb9-2"><a href="#cb9-2" aria-hidden="true"></a>softmax_kernel[(M,)](...)</span></code></pre></div>
+<ul>
+<li><strong>1 个 block 处理 1 行</strong></li>
+<li>共 M 行 → M 个 block</li>
+<li><code>program_id(0)</code> = 行号</li>
+</ul>
+<h3 id="block_size-的选择">2.6 BLOCK_SIZE 的选择</h3>
+<div class="sourceCode" id="cb10"><pre class="sourceCode python"><code class="sourceCode python"><span id="cb10-1"><a href="#cb10-1" aria-hidden="true"></a>block_size <span class="op">=</span> triton.next_power_of_2(N)</span></code></pre></div>
+<p>因为一行有 N 个元素，BLOCK_SIZE 必须是 N 的上界且是 2 的幂。</p>
+<p><strong>为什么 <code>next_power_of_2</code> 而不是 <code>cdiv</code>？</strong> - <code>cdiv(7, 4) = 2</code> → 这用于计算 block 数量 - <code>next_power_of_2(7) = 8</code> → 这用于 block 大小（必须是 2 的幂）</p>
+<hr />
+<h2 id="手动验证-softmax-正确性">3. 手动验证 Softmax 正确性</h2>
+<h3 id="用-numpy-验证">3.1 用 NumPy 验证</h3>
+<div class="sourceCode" id="cb11"><pre class="sourceCode python"><code class="sourceCode python"><span id="cb11-1"><a href="#cb11-1" aria-hidden="true"></a><span class="im">import</span> numpy <span class="im">as</span> np</span>
+<span id="cb11-2"><a href="#cb11-2" aria-hidden="true"></a></span>
+<span id="cb11-3"><a href="#cb11-3" aria-hidden="true"></a><span class="kw">def</span> numpy_softmax(x):</span>
+<span id="cb11-4"><a href="#cb11-4" aria-hidden="true"></a>    x <span class="op">=</span> x <span class="op">-</span> np.<span class="bu">max</span>(x)          <span class="co"># 数值稳定</span></span>
+<span id="cb11-5"><a href="#cb11-5" aria-hidden="true"></a>    e <span class="op">=</span> np.exp(x)</span>
+<span id="cb11-6"><a href="#cb11-6" aria-hidden="true"></a>    <span class="cf">return</span> e <span class="op">/</span> e.<span class="bu">sum</span>()</span>
+<span id="cb11-7"><a href="#cb11-7" aria-hidden="true"></a></span>
+<span id="cb11-8"><a href="#cb11-8" aria-hidden="true"></a><span class="co"># 测试</span></span>
+<span id="cb11-9"><a href="#cb11-9" aria-hidden="true"></a>x <span class="op">=</span> np.array([<span class="fl">1.0</span>, <span class="fl">2.0</span>, <span class="fl">3.0</span>, <span class="fl">4.0</span>, <span class="fl">5.0</span>])</span>
+<span id="cb11-10"><a href="#cb11-10" aria-hidden="true"></a><span class="bu">print</span>(numpy_softmax(x))</span>
+<span id="cb11-11"><a href="#cb11-11" aria-hidden="true"></a><span class="co"># [0.01165623 0.03168492 0.08612854 0.23412166 0.63640866]</span></span>
+<span id="cb11-12"><a href="#cb11-12" aria-hidden="true"></a><span class="co"># 所有元素之和 = 1.0 ✅</span></span></code></pre></div>
+<h3 id="验证-triton-实现">3.2 验证 Triton 实现</h3>
+<div class="sourceCode" id="cb12"><pre class="sourceCode python"><code class="sourceCode python"><span id="cb12-1"><a href="#cb12-1" aria-hidden="true"></a>x <span class="op">=</span> torch.randn(<span class="dv">100</span>, <span class="dv">256</span>, device<span class="op">=</span><span class="st">&quot;cuda&quot;</span>)</span>
+<span id="cb12-2"><a href="#cb12-2" aria-hidden="true"></a>y_torch <span class="op">=</span> torch.softmax(x, dim<span class="op">=-</span><span class="dv">1</span>)   <span class="co"># PyTorch 参考</span></span>
+<span id="cb12-3"><a href="#cb12-3" aria-hidden="true"></a>y_triton <span class="op">=</span> softmax_wrapper(x)         <span class="co"># 你的实现</span></span>
+<span id="cb12-4"><a href="#cb12-4" aria-hidden="true"></a></span>
+<span id="cb12-5"><a href="#cb12-5" aria-hidden="true"></a><span class="cf">assert</span> torch.allclose(y_torch, y_triton, atol<span class="op">=</span><span class="fl">1e-5</span>)</span></code></pre></div>
+<h3 id="极端值测试">3.3 极端值测试</h3>
+<div class="sourceCode" id="cb13"><pre class="sourceCode python"><code class="sourceCode python"><span id="cb13-1"><a href="#cb13-1" aria-hidden="true"></a>x_extreme <span class="op">=</span> torch.tensor([[<span class="fl">1.0</span>, <span class="op">-</span><span class="fl">100.0</span>, <span class="fl">100.0</span>, <span class="op">-</span><span class="fl">50.0</span>]], device<span class="op">=</span><span class="st">&quot;cuda&quot;</span>)</span></code></pre></div>
+<p>测试极端值确保你的实现没有溢出或产生 NaN。</p>
+<hr />
+<h2 id="layernorm-softmax-的亲戚">4. LayerNorm — Softmax 的亲戚</h2>
+<h3 id="layernorm-公式">4.1 LayerNorm 公式</h3>
+<pre><code>LayerNorm(x) = (x - mean(x)) / std(x) * γ + β
+
+其中:
+  mean(x) = Σᵢ xᵢ / N
+  var(x)  = Σᵢ (xᵢ - mean)² / N
+  std(x)  = √(var(x) + ε)</code></pre>
+<h3 id="和-softmax-的对比">4.2 和 Softmax 的对比</h3>
+<table>
+<thead>
+<tr class="header">
+<th></th>
+<th>Softmax</th>
+<th>LayerNorm</th>
+</tr>
+</thead>
+<tbody>
+<tr class="odd">
+<td><strong>聚合统计量</strong></td>
+<td>max, sum(exp)</td>
+<td>mean, var</td>
+</tr>
+<tr class="even">
+<td><strong>扫描次数</strong></td>
+<td>2</td>
+<td>2</td>
+</tr>
+<tr class="odd">
+<td><strong>计算类型</strong></td>
+<td>非线性（exp, div）</td>
+<td>线性（sub, mul, div）</td>
+</tr>
+<tr class="even">
+<td><strong>额外参数</strong></td>
+<td>无</td>
+<td>γ, β（learnable）</td>
+</tr>
+</tbody>
+</table>
+<h3 id="triton-实现">4.3 Triton 实现</h3>
+<div class="sourceCode" id="cb15"><pre class="sourceCode python"><code class="sourceCode python"><span id="cb15-1"><a href="#cb15-1" aria-hidden="true"></a><span class="at">@triton.jit</span></span>
+<span id="cb15-2"><a href="#cb15-2" aria-hidden="true"></a><span class="kw">def</span> layernorm_kernel(x_ptr, y_ptr, gamma_ptr, beta_ptr,</span>
+<span id="cb15-3"><a href="#cb15-3" aria-hidden="true"></a>                     row_stride, num_cols, eps, BLOCK_SIZE: tl.constexpr):</span>
+<span id="cb15-4"><a href="#cb15-4" aria-hidden="true"></a>    row_idx <span class="op">=</span> tl.program_id(axis<span class="op">=</span><span class="dv">0</span>)</span>
+<span id="cb15-5"><a href="#cb15-5" aria-hidden="true"></a>    col_offsets <span class="op">=</span> tl.arange(<span class="dv">0</span>, BLOCK_SIZE)</span>
+<span id="cb15-6"><a href="#cb15-6" aria-hidden="true"></a></span>
+<span id="cb15-7"><a href="#cb15-7" aria-hidden="true"></a>    row_start <span class="op">=</span> x_ptr <span class="op">+</span> row_idx <span class="op">*</span> row_stride</span>
+<span id="cb15-8"><a href="#cb15-8" aria-hidden="true"></a>    x_row <span class="op">=</span> tl.load(row_start <span class="op">+</span> col_offsets,</span>
+<span id="cb15-9"><a href="#cb15-9" aria-hidden="true"></a>                    mask<span class="op">=</span>col_offsets <span class="op">&lt;</span> num_cols, other<span class="op">=</span><span class="fl">0.0</span>)</span>
+<span id="cb15-10"><a href="#cb15-10" aria-hidden="true"></a></span>
+<span id="cb15-11"><a href="#cb15-11" aria-hidden="true"></a>    <span class="co"># 计算 mean</span></span>
+<span id="cb15-12"><a href="#cb15-12" aria-hidden="true"></a>    mean <span class="op">=</span> tl.<span class="bu">sum</span>(x_row, axis<span class="op">=</span><span class="dv">0</span>) <span class="op">/</span> num_cols</span>
+<span id="cb15-13"><a href="#cb15-13" aria-hidden="true"></a></span>
+<span id="cb15-14"><a href="#cb15-14" aria-hidden="true"></a>    <span class="co"># 计算 var</span></span>
+<span id="cb15-15"><a href="#cb15-15" aria-hidden="true"></a>    var <span class="op">=</span> tl.<span class="bu">sum</span>((x_row <span class="op">-</span> mean) <span class="op">*</span> (x_row <span class="op">-</span> mean), axis<span class="op">=</span><span class="dv">0</span>) <span class="op">/</span> num_cols</span>
+<span id="cb15-16"><a href="#cb15-16" aria-hidden="true"></a></span>
+<span id="cb15-17"><a href="#cb15-17" aria-hidden="true"></a>    <span class="co"># Normalize</span></span>
+<span id="cb15-18"><a href="#cb15-18" aria-hidden="true"></a>    x_norm <span class="op">=</span> (x_row <span class="op">-</span> mean) <span class="op">/</span> tl.sqrt(var <span class="op">+</span> eps)</span>
+<span id="cb15-19"><a href="#cb15-19" aria-hidden="true"></a></span>
+<span id="cb15-20"><a href="#cb15-20" aria-hidden="true"></a>    <span class="co"># 加载 gamma 和 beta</span></span>
+<span id="cb15-21"><a href="#cb15-21" aria-hidden="true"></a>    gamma <span class="op">=</span> tl.load(gamma_ptr <span class="op">+</span> col_offsets, mask<span class="op">=</span>col_offsets <span class="op">&lt;</span> num_cols)</span>
+<span id="cb15-22"><a href="#cb15-22" aria-hidden="true"></a>    beta <span class="op">=</span> tl.load(beta_ptr <span class="op">+</span> col_offsets, mask<span class="op">=</span>col_offsets <span class="op">&lt;</span> num_cols)</span>
+<span id="cb15-23"><a href="#cb15-23" aria-hidden="true"></a></span>
+<span id="cb15-24"><a href="#cb15-24" aria-hidden="true"></a>    <span class="co"># 缩放平移</span></span>
+<span id="cb15-25"><a href="#cb15-25" aria-hidden="true"></a>    y_row <span class="op">=</span> x_norm <span class="op">*</span> gamma <span class="op">+</span> beta</span>
+<span id="cb15-26"><a href="#cb15-26" aria-hidden="true"></a></span>
+<span id="cb15-27"><a href="#cb15-27" aria-hidden="true"></a>    <span class="co"># 写回</span></span>
+<span id="cb15-28"><a href="#cb15-28" aria-hidden="true"></a>    y_row_start <span class="op">=</span> y_ptr <span class="op">+</span> row_idx <span class="op">*</span> row_stride</span>
+<span id="cb15-29"><a href="#cb15-29" aria-hidden="true"></a>    tl.store(y_row_start <span class="op">+</span> col_offsets, y_row, mask<span class="op">=</span>col_offsets <span class="op">&lt;</span> num_cols)</span></code></pre></div>
+<h3 id="理解-other0.0-参数">4.4 理解 <code>other=0.0</code> 参数</h3>
+<div class="sourceCode" id="cb16"><pre class="sourceCode python"><code class="sourceCode python"><span id="cb16-1"><a href="#cb16-1" aria-hidden="true"></a>x_row <span class="op">=</span> tl.load(row_start <span class="op">+</span> col_offsets,</span>
+<span id="cb16-2"><a href="#cb16-2" aria-hidden="true"></a>                mask<span class="op">=</span>col_offsets <span class="op">&lt;</span> num_cols, other<span class="op">=</span><span class="fl">0.0</span>)</span></code></pre></div>
+<p><code>other</code> 指定<strong>被 mask 掉的元素用什么值填充</strong>。</p>
+<ul>
+<li>Softmax 用 <code>other=float("-inf")</code> — 减 max 后变成 <code>-inf</code>，exp 后是 0</li>
+<li>LayerNorm 用 <code>other=0.0</code> — 加 0 不影响 mean/var 计算</li>
+</ul>
+<hr />
+<h2 id="动手练习">5. 动手练习</h2>
+<h3 id="练习-1groupsoftmax">练习 1：GroupSoftmax</h3>
+<p>实现按组做 softmax（不是整行，而是每 K 个元素一组）：</p>
+<div class="sourceCode" id="cb17"><pre class="sourceCode python"><code class="sourceCode python"><span id="cb17-1"><a href="#cb17-1" aria-hidden="true"></a><span class="co"># 输入: [1, 2, 3, 4, 5, 6]</span></span>
+<span id="cb17-2"><a href="#cb17-2" aria-hidden="true"></a><span class="co"># group_size = 2</span></span>
+<span id="cb17-3"><a href="#cb17-3" aria-hidden="true"></a><span class="co"># 输出: softmax([1,2]), softmax([3,4]), softmax([5,6])</span></span>
+<span id="cb17-4"><a href="#cb17-4" aria-hidden="true"></a><span class="co">#     = [0.27, 0.73], [0.27, 0.73], [0.27, 0.73]</span></span></code></pre></div>
+<p>提示：在 kernel 中用 <code>col_offsets % group_size</code> 判断每组的边界。</p>
+<h3 id="练习-2rmsnorm">练习 2：RMSNorm</h3>
+<p>RMSNorm 是 LayerNorm 的简化版（去掉 mean）：</p>
+<pre><code>RMSNorm(x) = x / √(Σx²/N) * γ</code></pre>
+<h3 id="练习-3对比实验">练习 3：对比实验</h3>
+<div class="sourceCode" id="cb19"><pre class="sourceCode python"><code class="sourceCode python"><span id="cb19-1"><a href="#cb19-1" aria-hidden="true"></a><span class="cf">for</span> N <span class="kw">in</span> [<span class="dv">64</span>, <span class="dv">128</span>, <span class="dv">256</span>, <span class="dv">512</span>, <span class="dv">1024</span>, <span class="dv">2048</span>]:</span>
+<span id="cb19-2"><a href="#cb19-2" aria-hidden="true"></a>    x <span class="op">=</span> torch.randn(<span class="dv">1000</span>, N, device<span class="op">=</span><span class="st">&quot;cuda&quot;</span>)</span>
+<span id="cb19-3"><a href="#cb19-3" aria-hidden="true"></a>    <span class="co"># 对比 PyTorch softmax 和 Triton softmax 的时间</span></span></code></pre></div>
+<p><strong>思考：</strong> 什么时候 Triton 比 PyTorch 快？什么时候差不多？</p>
+<details>
+<p><summary>点击查看分析</summary></p>
+<ul>
+<li>小 N (64-256): PyTorch 更快。PyTorch 的 softmax 经过高度优化，Triton 的启动开销相对更大。</li>
+<li>中 N (512-2048): 两者接近。</li>
+<li>大 N (4096+): Triton 可能更快（如果 kernel 写得好的话）。</li>
+</ul>
+<p>实际中，Softmax 通常由 PyTorch 原生实现，因为已经非常优化了。 Triton 的真正价值在更复杂的操作（如 FlashAttention）上。</p>
+</details>
+<hr />
+<h2 id="核心知识点总结">6. 核心知识点总结</h2>
+<h3 id="行级聚合模板">6.1 行级聚合模板</h3>
+<div class="sourceCode" id="cb20"><pre class="sourceCode python"><code class="sourceCode python"><span id="cb20-1"><a href="#cb20-1" aria-hidden="true"></a><span class="at">@triton.jit</span></span>
+<span id="cb20-2"><a href="#cb20-2" aria-hidden="true"></a><span class="kw">def</span> kernel(x_ptr, y_ptr, row_stride, N, BLOCK_SIZE: tl.constexpr):</span>
+<span id="cb20-3"><a href="#cb20-3" aria-hidden="true"></a>    row <span class="op">=</span> tl.program_id(<span class="dv">0</span>)</span>
+<span id="cb20-4"><a href="#cb20-4" aria-hidden="true"></a>    offsets <span class="op">=</span> tl.arange(<span class="dv">0</span>, BLOCK_SIZE)</span>
+<span id="cb20-5"><a href="#cb20-5" aria-hidden="true"></a></span>
+<span id="cb20-6"><a href="#cb20-6" aria-hidden="true"></a>    <span class="co"># 1. 加载整行</span></span>
+<span id="cb20-7"><a href="#cb20-7" aria-hidden="true"></a>    x <span class="op">=</span> tl.load(x_ptr <span class="op">+</span> row <span class="op">*</span> row_stride <span class="op">+</span> offsets,</span>
+<span id="cb20-8"><a href="#cb20-8" aria-hidden="true"></a>                mask<span class="op">=</span>offsets <span class="op">&lt;</span> N, other<span class="op">=</span>...)</span>
+<span id="cb20-9"><a href="#cb20-9" aria-hidden="true"></a></span>
+<span id="cb20-10"><a href="#cb20-10" aria-hidden="true"></a>    <span class="co"># 2. 聚合（多遍扫描）</span></span>
+<span id="cb20-11"><a href="#cb20-11" aria-hidden="true"></a>    stat1 <span class="op">=</span> tl.<span class="bu">max</span>(x, axis<span class="op">=</span><span class="dv">0</span>)        <span class="co"># 第1遍</span></span>
+<span id="cb20-12"><a href="#cb20-12" aria-hidden="true"></a>    x <span class="op">=</span> x <span class="op">-</span> stat1                    <span class="co"># 预处理</span></span>
+<span id="cb20-13"><a href="#cb20-13" aria-hidden="true"></a>    stat2 <span class="op">=</span> tl.<span class="bu">sum</span>(x, axis<span class="op">=</span><span class="dv">0</span>)        <span class="co"># 第2遍</span></span>
+<span id="cb20-14"><a href="#cb20-14" aria-hidden="true"></a>    y <span class="op">=</span> x <span class="op">/</span> stat2                    <span class="co"># 归一化</span></span>
+<span id="cb20-15"><a href="#cb20-15" aria-hidden="true"></a></span>
+<span id="cb20-16"><a href="#cb20-16" aria-hidden="true"></a>    <span class="co"># 3. 写回</span></span>
+<span id="cb20-17"><a href="#cb20-17" aria-hidden="true"></a>    tl.store(y_ptr <span class="op">+</span> row <span class="op">*</span> row_stride <span class="op">+</span> offsets, y, mask<span class="op">=</span>offsets <span class="op">&lt;</span> N)</span>
+<span id="cb20-18"><a href="#cb20-18" aria-hidden="true"></a></span>
+<span id="cb20-19"><a href="#cb20-19" aria-hidden="true"></a><span class="co"># 启动: kernel[(M,)](...)  # M = 行数</span></span></code></pre></div>
+<h3 id="tl.max-和-tl.sum-的-axis-参数">6.2 <code>tl.max</code> 和 <code>tl.sum</code> 的 axis 参数</h3>
+<div class="sourceCode" id="cb21"><pre class="sourceCode python"><code class="sourceCode python"><span id="cb21-1"><a href="#cb21-1" aria-hidden="true"></a><span class="co"># 对于 1D 向量 x (shape: BLOCK_SIZE)</span></span>
+<span id="cb21-2"><a href="#cb21-2" aria-hidden="true"></a>tl.<span class="bu">max</span>(x, axis<span class="op">=</span><span class="dv">0</span>)    → 标量 (<span class="bu">max</span> of <span class="bu">all</span> elements)</span>
+<span id="cb21-3"><a href="#cb21-3" aria-hidden="true"></a>tl.<span class="bu">sum</span>(x, axis<span class="op">=</span><span class="dv">0</span>)    → 标量 (<span class="bu">sum</span> of <span class="bu">all</span> elements)</span>
+<span id="cb21-4"><a href="#cb21-4" aria-hidden="true"></a></span>
+<span id="cb21-5"><a href="#cb21-5" aria-hidden="true"></a><span class="co"># 对于 2D 矩阵 x (shape: M, N)</span></span>
+<span id="cb21-6"><a href="#cb21-6" aria-hidden="true"></a>tl.<span class="bu">max</span>(x, axis<span class="op">=</span><span class="dv">0</span>)    → (N,) 每列的 <span class="bu">max</span></span>
+<span id="cb21-7"><a href="#cb21-7" aria-hidden="true"></a>tl.<span class="bu">max</span>(x, axis<span class="op">=</span><span class="dv">1</span>)    → (M,) 每行的 <span class="bu">max</span></span></code></pre></div>
+<h3 id="数值稳定三板斧">6.3 数值稳定三板斧</h3>
+<div class="sourceCode" id="cb22"><pre class="sourceCode python"><code class="sourceCode python"><span id="cb22-1"><a href="#cb22-1" aria-hidden="true"></a><span class="co"># 1. 减 max</span></span>
+<span id="cb22-2"><a href="#cb22-2" aria-hidden="true"></a>x <span class="op">=</span> x <span class="op">-</span> tl.<span class="bu">max</span>(x, axis<span class="op">=</span><span class="dv">0</span>)</span>
+<span id="cb22-3"><a href="#cb22-3" aria-hidden="true"></a></span>
+<span id="cb22-4"><a href="#cb22-4" aria-hidden="true"></a><span class="co"># 2. exp</span></span>
+<span id="cb22-5"><a href="#cb22-5" aria-hidden="true"></a>e <span class="op">=</span> tl.exp(x)</span>
+<span id="cb22-6"><a href="#cb22-6" aria-hidden="true"></a></span>
+<span id="cb22-7"><a href="#cb22-7" aria-hidden="true"></a><span class="co"># 3. 除以 sum</span></span>
+<span id="cb22-8"><a href="#cb22-8" aria-hidden="true"></a>y <span class="op">=</span> e <span class="op">/</span> tl.<span class="bu">sum</span>(e, axis<span class="op">=</span><span class="dv">0</span>)</span></code></pre></div>
+<p>这个模式在 Softmax、LayerNorm、Attention 中反复出现。</p>
+<hr />
+<h2 id="下一章预告">7. 下一章预告</h2>
+<p>下一章是本章的进阶：矩阵乘法。Softmax 中我们学的是“一行内的聚合”，矩阵乘法需要“跨行的聚合”——这正是 Triton 最核心的编程模式：<strong>Tiling + Shared Memory</strong>。</p>
+<p><strong>运行本章代码：</strong> <code>python 03_softmax.py</code> <strong>下一章：</strong> 第四章 — 矩阵乘法 Tiling</p>

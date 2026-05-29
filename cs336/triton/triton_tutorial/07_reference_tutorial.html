@@ -1,0 +1,169 @@
+<h1 id="第七章速查表与进阶资源">第七章：速查表与进阶资源</h1>
+<blockquote>
+<p><strong>本章目的：</strong> 提供一个完整的参考手册，涵盖前六章的核心知识。 建议打印或打开在另一个屏幕，写代码时随时参考。</p>
+</blockquote>
+<hr />
+<h2 id="triton-编程模型速查">1. Triton 编程模型速查</h2>
+<pre><code>Grid (网格)
+  ├── Block 0 (pid=0): 处理元素 [0, BLOCK_SIZE)
+  ├── Block 1 (pid=1): 处理元素 [BLOCK_SIZE, 2*BLOCK_SIZE)
+  └── Block N (pid=N): 处理元素 [N*BLOCK_SIZE, (N+1)*BLOCK_SIZE)
+
+核心 API:
+  tl.program_id(axis)     → 当前 block ID
+  tl.arange(N)            → [0, 1, ..., N-1]
+  tl.cdiv(a, b)           → ceil(a / b)
+  tl.next_power_of_2(n)   → ≥n 的最小 2 的幂
+
+内存操作:
+  tl.load(ptr, mask=mask)  → 从全局内存读
+  tl.store(ptr, val, mask) → 写回全局内存
+
+Block Pointer:
+  ptr = tl.make_block_ptr(base, shape, strides,
+                          offsets, block_shape, order)
+  ptr = ptr.advance((row_shift, col_shift))
+  val = tl.load(ptr)</code></pre>
+<hr />
+<h2 id="算子模板速查">2. 算子模板速查</h2>
+<h3 id="元素级操作">2.1 元素级操作</h3>
+<div class="sourceCode" id="cb2"><pre class="sourceCode python"><code class="sourceCode python"><span id="cb2-1"><a href="#cb2-1" aria-hidden="true"></a><span class="at">@triton.jit</span></span>
+<span id="cb2-2"><a href="#cb2-2" aria-hidden="true"></a><span class="kw">def</span> kernel(x_ptr, y_ptr, n, BLOCK_SIZE: tl.constexpr):</span>
+<span id="cb2-3"><a href="#cb2-3" aria-hidden="true"></a>    pid <span class="op">=</span> tl.program_id(<span class="dv">0</span>)</span>
+<span id="cb2-4"><a href="#cb2-4" aria-hidden="true"></a>    offsets <span class="op">=</span> pid <span class="op">*</span> BLOCK_SIZE <span class="op">+</span> tl.arange(<span class="dv">0</span>, BLOCK_SIZE)</span>
+<span id="cb2-5"><a href="#cb2-5" aria-hidden="true"></a>    mask <span class="op">=</span> offsets <span class="op">&lt;</span> n</span>
+<span id="cb2-6"><a href="#cb2-6" aria-hidden="true"></a>    x <span class="op">=</span> tl.load(x_ptr <span class="op">+</span> offsets, mask<span class="op">=</span>mask)</span>
+<span id="cb2-7"><a href="#cb2-7" aria-hidden="true"></a>    y <span class="op">=</span> your_formula(x)</span>
+<span id="cb2-8"><a href="#cb2-8" aria-hidden="true"></a>    tl.store(y_ptr <span class="op">+</span> offsets, y, mask<span class="op">=</span>mask)</span>
+<span id="cb2-9"><a href="#cb2-9" aria-hidden="true"></a></span>
+<span id="cb2-10"><a href="#cb2-10" aria-hidden="true"></a>num_blocks <span class="op">=</span> triton.cdiv(n, BLOCK_SIZE)</span>
+<span id="cb2-11"><a href="#cb2-11" aria-hidden="true"></a>kernel[(num_blocks,)](x, y, n, BLOCK_SIZE<span class="op">=</span>BLOCK_SIZE)</span></code></pre></div>
+<h3 id="行级聚合">2.2 行级聚合</h3>
+<div class="sourceCode" id="cb3"><pre class="sourceCode python"><code class="sourceCode python"><span id="cb3-1"><a href="#cb3-1" aria-hidden="true"></a><span class="at">@triton.jit</span></span>
+<span id="cb3-2"><a href="#cb3-2" aria-hidden="true"></a><span class="kw">def</span> kernel(x_ptr, y_ptr, row_stride, N, BLOCK_SIZE: tl.constexpr):</span>
+<span id="cb3-3"><a href="#cb3-3" aria-hidden="true"></a>    row <span class="op">=</span> tl.program_id(<span class="dv">0</span>)</span>
+<span id="cb3-4"><a href="#cb3-4" aria-hidden="true"></a>    offsets <span class="op">=</span> tl.arange(<span class="dv">0</span>, BLOCK_SIZE)</span>
+<span id="cb3-5"><a href="#cb3-5" aria-hidden="true"></a>    x <span class="op">=</span> tl.load(x_ptr <span class="op">+</span> row <span class="op">*</span> row_stride <span class="op">+</span> offsets,</span>
+<span id="cb3-6"><a href="#cb3-6" aria-hidden="true"></a>                mask<span class="op">=</span>offsets <span class="op">&lt;</span> N, other<span class="op">=</span>...)</span>
+<span id="cb3-7"><a href="#cb3-7" aria-hidden="true"></a>    <span class="co"># ... 聚合计算 ...</span></span>
+<span id="cb3-8"><a href="#cb3-8" aria-hidden="true"></a>    y <span class="op">=</span> ...</span>
+<span id="cb3-9"><a href="#cb3-9" aria-hidden="true"></a>    tl.store(y_ptr <span class="op">+</span> row <span class="op">*</span> row_stride <span class="op">+</span> offsets, y, mask<span class="op">=</span>offsets <span class="op">&lt;</span> N)</span>
+<span id="cb3-10"><a href="#cb3-10" aria-hidden="true"></a></span>
+<span id="cb3-11"><a href="#cb3-11" aria-hidden="true"></a>kernel[(M,)](x, y, x.stride(<span class="dv">0</span>), N, BLOCK_SIZE<span class="op">=</span>...)</span></code></pre></div>
+<h3 id="矩阵乘法-tiling">2.3 矩阵乘法 Tiling</h3>
+<div class="sourceCode" id="cb4"><pre class="sourceCode python"><code class="sourceCode python"><span id="cb4-1"><a href="#cb4-1" aria-hidden="true"></a><span class="at">@triton.jit</span></span>
+<span id="cb4-2"><a href="#cb4-2" aria-hidden="true"></a><span class="kw">def</span> matmul_kernel(A, B, C, M, N, K, ...):</span>
+<span id="cb4-3"><a href="#cb4-3" aria-hidden="true"></a>    pid_m <span class="op">=</span> tl.program_id(<span class="dv">0</span>)</span>
+<span id="cb4-4"><a href="#cb4-4" aria-hidden="true"></a>    pid_n <span class="op">=</span> tl.program_id(<span class="dv">1</span>)</span>
+<span id="cb4-5"><a href="#cb4-5" aria-hidden="true"></a>    offset_m <span class="op">=</span> pid_m <span class="op">*</span> BLOCK_M <span class="op">+</span> tl.arange(<span class="dv">0</span>, BLOCK_M)</span>
+<span id="cb4-6"><a href="#cb4-6" aria-hidden="true"></a>    offset_n <span class="op">=</span> pid_n <span class="op">*</span> BLOCK_N <span class="op">+</span> tl.arange(<span class="dv">0</span>, BLOCK_N)</span>
+<span id="cb4-7"><a href="#cb4-7" aria-hidden="true"></a></span>
+<span id="cb4-8"><a href="#cb4-8" aria-hidden="true"></a>    acc <span class="op">=</span> tl.zeros((BLOCK_M, BLOCK_N), dtype<span class="op">=</span>tl.float32)</span>
+<span id="cb4-9"><a href="#cb4-9" aria-hidden="true"></a></span>
+<span id="cb4-10"><a href="#cb4-10" aria-hidden="true"></a>    <span class="cf">for</span> k <span class="kw">in</span> <span class="bu">range</span>(<span class="dv">0</span>, K, BLOCK_K):</span>
+<span id="cb4-11"><a href="#cb4-11" aria-hidden="true"></a>        a <span class="op">=</span> tl.load(...)  <span class="co"># (BLOCK_M, BLOCK_K)</span></span>
+<span id="cb4-12"><a href="#cb4-12" aria-hidden="true"></a>        b <span class="op">=</span> tl.load(...)  <span class="co"># (BLOCK_K, BLOCK_N)</span></span>
+<span id="cb4-13"><a href="#cb4-13" aria-hidden="true"></a>        acc <span class="op">+=</span> tl.dot(a, b)</span>
+<span id="cb4-14"><a href="#cb4-14" aria-hidden="true"></a></span>
+<span id="cb4-15"><a href="#cb4-15" aria-hidden="true"></a>    tl.store(C <span class="op">+</span> ..., acc.to(C.<span class="bu">type</span>), mask<span class="op">=</span>...)</span>
+<span id="cb4-16"><a href="#cb4-16" aria-hidden="true"></a></span>
+<span id="cb4-17"><a href="#cb4-17" aria-hidden="true"></a>kernel[(cdiv(M,BLOCK_M), cdiv(N,BLOCK_N))](...)</span></code></pre></div>
+<hr />
+<h2 id="flashattention-公式速查">3. FlashAttention 公式速查</h2>
+<h3 id="forward">3.1 Forward</h3>
+<pre><code>初始化: M=-inf, L=0, O=0
+
+每轮 KV block:
+  S = Q @ K^T / √D
+  M_block = max(S, axis=1)
+  M_new = max(M, M_block)
+  P = exp(S - M_block)
+  L_new = exp(M-M_new)·L + sum(P)·exp(M_block-M_new)
+  O_new = exp(M-M_new)·O + P @ V
+
+最终: Output = O / L</code></pre>
+<h3 id="backward">3.2 Backward</h3>
+<pre><code>D = (dO × O).sum(dim=-1)
+
+每对 (Q_block, KV_block):
+  Recompute: S = Q_i @ K_j^T / √D
+  Recompute: P = exp(S - m_i) / l_i
+  dV_j += P^T @ dO_i
+  dP = dO_i @ V_j^T
+  dS = P × (dP - D)
+  dQ_i += dS @ K_j × scale
+  dK_j += dS^T @ Q_i × scale</code></pre>
+<hr />
+<h2 id="tl-函数速查">4. tl 函数速查</h2>
+<pre><code>tl.maximum(a, b)     → 逐元素 max
+tl.exp(x)            → 逐元素 exp
+tl.log(x)            → 逐元素 log
+tl.sqrt(x)           → 逐元素 sqrt
+tl.where(cond, a, b) → 条件选择
+tl.dot(a, b)         → 矩阵乘法
+tl.full(shape, val)  → 填充
+tl.zeros(shape)      → 零
+tl.arange(n)         → [0..n-1]
+tl.cdiv(a, b)        → ceil(a/b)
+tl.next_power_of_2(n)→ 2的幂
+tl.sum(x, axis=0)    → 求和
+tl.max(x, axis=0)    → 最大值
+tl.tanh(a)           → ❌ 不存在! 用 (exp(2a)-1)/(exp(2a)+1)</code></pre>
+<hr />
+<h2 id="性能优化-checklist">5. 性能优化 Checklist</h2>
+<ul class="task-list">
+<li><input type="checkbox" disabled="" />
+BLOCK_SIZE 是 2 的幂 (128, 256, 512, 1024)</li>
+<li><input type="checkbox" disabled="" />
+用 <code>tl.constexpr</code> 标记编译期常量</li>
+<li><input type="checkbox" disabled="" />
+用 <code>tl.make_block_ptr</code> + <code>tl.load/store</code> (自动 coalescing)</li>
+<li><input type="checkbox" disabled="" />
+Grid 的 block 数量 ≥ 4 × SM 数 (H100: ≥ 528)</li>
+<li><input type="checkbox" disabled="" />
+中间计算用 float32，最终写回时转 float16</li>
+<li><input type="checkbox" disabled="" />
+用 <code>torch.profiler</code> 分析，不优化你以为的瓶颈</li>
+<li><input type="checkbox" disabled="" />
+减少全局内存读写 (每个元素读一次，算完再写一次)</li>
+</ul>
+<hr />
+<h2 id="调试-checklist">6. 调试 Checklist</h2>
+<ul class="task-list">
+<li><input type="checkbox" disabled="" />
+用 <code>TRITON_INTERPRET=1</code> 在 CPU 上测试</li>
+<li><input type="checkbox" disabled="" />
+用小块数据 (B=1, N=32, D=64) 开始</li>
+<li><input type="checkbox" disabled="" />
+对比 PyTorch 的结果</li>
+<li><input type="checkbox" disabled="" />
+检查数据类型 (中间 f32，最终 f16)</li>
+<li><input type="checkbox" disabled="" />
+检查 mask 是否正确 (边界处理)</li>
+<li><input type="checkbox" disabled="" />
+检查 stride 是否正确 (<code>tensor.stride()</code>)</li>
+</ul>
+<hr />
+<h2 id="学习路径">7. 学习路径</h2>
+<pre><code>Level 1 (1-2天):  完成 01-03 章 → 元素级 + 行级操作
+Level 2 (3-5天):  完成 04-05 章 → MatMul + FlashAttention
+Level 3 (1-2周):  完成 06 章 + 补全 backward + 做 Assignment 2
+Level 4 (持续):   FlashAttention-2/3, vLLM kernel, Triton 源码</code></pre>
+<hr />
+<h2 id="参考资源">8. 参考资源</h2>
+<ul>
+<li><strong>Triton:</strong> https://github.com/triton-lang/triton</li>
+<li><strong>Tutorial:</strong> https://triton-lang.org/main/getting-started/tutorials/</li>
+<li><strong>FA1 论文:</strong> https://arxiv.org/abs/2205.14135</li>
+<li><strong>FA2 论文:</strong> https://arxiv.org/abs/2307.08691</li>
+<li><strong>FA3 论文:</strong> https://arxiv.org/abs/2407.08608</li>
+<li><strong>Horace He 博客:</strong> https://horace.io/brrr_intro.html</li>
+<li><strong>CUDA MODE:</strong> https://www.youtube.com/<span class="citation" data-cites="CUDAMODE">@CUDAMODE</span></li>
+<li><strong>GPU Puzzles:</strong> https://github.com/srush/gpu-puzzles</li>
+<li><strong>CS336:</strong> https://github.com/stanford-cs336/spring2025-lectures</li>
+<li><strong>diy-llm:</strong> https://github.com/datawhalechina/diy-llm</li>
+</ul>
+<hr />
+<blockquote>
+<p><strong>恭喜你完成整个教程！</strong> 从 Hello World 到 FlashAttention，你已经掌握了 Triton 的核心编程范式。</p>
+</blockquote>

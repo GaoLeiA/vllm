@@ -1,0 +1,278 @@
+<h1 id="第一章triton-hello-world-你的第一个-gpu-kernel">第一章：Triton Hello World — 你的第一个 GPU Kernel</h1>
+<blockquote>
+<p><strong>你将学到什么：</strong> - GPU 编程的核心抽象：Grid → Block → Thread - Triton 的 <code>@triton.jit</code> 装饰器 - <code>tl.program_id()</code>, <code>tl.arange()</code>, <code>tl.load()</code>, <code>tl.store()</code> - 如何启动一个 kernel 并验证结果</p>
+<p><strong>前置知识：</strong> 基本 Python、PyTorch 张量操作 <strong>预计时间：</strong> 30 分钟 <strong>最终成果：</strong> 一个能在 GPU 上加 1 的 Triton kernel</p>
+</blockquote>
+<hr />
+<h2 id="gpu-编程的三层抽象">1. GPU 编程的三层抽象</h2>
+<h3 id="从并行计算说起">1.1 从并行计算说起</h3>
+<p>GPU 的核心思想很简单：<strong>让成千上万个线程同时工作，每个线程处理一个数据元素。</strong></p>
+<p>想象你要给 100 万个数字各加 1：</p>
+<div class="sourceCode" id="cb1"><pre class="sourceCode python"><code class="sourceCode python"><span id="cb1-1"><a href="#cb1-1" aria-hidden="true"></a><span class="co"># CPU 的做法：一个接一个</span></span>
+<span id="cb1-2"><a href="#cb1-2" aria-hidden="true"></a><span class="cf">for</span> i <span class="kw">in</span> <span class="bu">range</span>(<span class="dv">1_000_000</span>):</span>
+<span id="cb1-3"><a href="#cb1-3" aria-hidden="true"></a>    x[i] <span class="op">=</span> x[i] <span class="op">+</span> <span class="dv">1</span></span></code></pre></div>
+<p>GPU 的做法：<strong>100 万个线程同时做这件事</strong>，每个线程只处理一个元素。</p>
+<h3 id="三层组织结构">1.2 三层组织结构</h3>
+<p>GPU 的线程不是一盘散沙，而是三层组织：</p>
+<pre><code>┌─────────────────────────────────────────────┐
+│  Grid (网格) — 整个计算任务                  │
+│  ┌─────────────┐  ┌─────────────┐           │
+│  │ Block 0     │  │ Block 1     │  ...      │
+│  │ ┌───┬───┬───┐│  │ ┌───┬───┬───┐│         │
+│  │ │T0 │T1 │T2 ││  │ │T0 │T1 │T2 ││         │
+│  │ │T3 │T4 │T5 ││  │ │T3 │T4 │T5 ││         │
+│  │ └───┴───┴───┘│  │ └───┴───┴───┘│         │
+│  └─────────────┘  └─────────────┘           │
+└─────────────────────────────────────────────┘</code></pre>
+<table>
+<thead>
+<tr class="header">
+<th>层级</th>
+<th>类比</th>
+<th>特点</th>
+</tr>
+</thead>
+<tbody>
+<tr class="odd">
+<td><strong>Grid</strong></td>
+<td>整个工厂</td>
+<td>包含所有 Block</td>
+</tr>
+<tr class="even">
+<td><strong>Block</strong></td>
+<td>一条流水线</td>
+<td>Block 内的线程共享高速内存</td>
+</tr>
+<tr class="odd">
+<td><strong>Thread</strong></td>
+<td>单个工人</td>
+<td>执行一段代码，处理一个数据</td>
+</tr>
+</tbody>
+</table>
+<p><strong>关键规则：</strong> - Block 内的线程可以互相通信（通过 Shared Memory）和同步（barrier） - Block 之间的线程<strong>不能</strong>直接通信 - 每个 Thread 执行<strong>完全相同的代码</strong>，但处理<strong>不同的数据索引</strong></p>
+<h3 id="类比工厂流水线">1.3 类比：工厂流水线</h3>
+<blockquote>
+<p><strong>Warehouse : DRAM :: Factory : SRAM</strong></p>
+<ul>
+<li>DRAM（显存）= 仓库，容量大（80GB），速度慢</li>
+<li>SRAM（共享内存）= 工厂工作台，容量小（几百KB），速度快</li>
+</ul>
+<p>Triton 帮你自动管理“从仓库拿货 → 放到工作台 → 加工 → 放回仓库”的过程。</p>
+</blockquote>
+<hr />
+<h2 id="你的第一个-triton-kernel">2. 你的第一个 Triton Kernel</h2>
+<h3 id="最简单的-kernel给每个元素加-1">2.1 最简单的 Kernel：给每个元素加 1</h3>
+<div class="sourceCode" id="cb3"><pre class="sourceCode python"><code class="sourceCode python"><span id="cb3-1"><a href="#cb3-1" aria-hidden="true"></a><span class="im">import</span> triton</span>
+<span id="cb3-2"><a href="#cb3-2" aria-hidden="true"></a><span class="im">import</span> triton.language <span class="im">as</span> tl</span>
+<span id="cb3-3"><a href="#cb3-3" aria-hidden="true"></a><span class="im">import</span> torch</span>
+<span id="cb3-4"><a href="#cb3-4" aria-hidden="true"></a></span>
+<span id="cb3-5"><a href="#cb3-5" aria-hidden="true"></a><span class="at">@triton.jit</span></span>
+<span id="cb3-6"><a href="#cb3-6" aria-hidden="true"></a><span class="kw">def</span> hello_kernel(x_ptr, y_ptr, n_elements, BLOCK_SIZE: tl.constexpr):</span>
+<span id="cb3-7"><a href="#cb3-7" aria-hidden="true"></a>    <span class="co"># 第1步：我是第几个 block?</span></span>
+<span id="cb3-8"><a href="#cb3-8" aria-hidden="true"></a>    pid <span class="op">=</span> tl.program_id(axis<span class="op">=</span><span class="dv">0</span>)</span>
+<span id="cb3-9"><a href="#cb3-9" aria-hidden="true"></a></span>
+<span id="cb3-10"><a href="#cb3-10" aria-hidden="true"></a>    <span class="co"># 第2步：我从哪个位置开始处理?</span></span>
+<span id="cb3-11"><a href="#cb3-11" aria-hidden="true"></a>    block_start <span class="op">=</span> pid <span class="op">*</span> BLOCK_SIZE</span>
+<span id="cb3-12"><a href="#cb3-12" aria-hidden="true"></a></span>
+<span id="cb3-13"><a href="#cb3-13" aria-hidden="true"></a>    <span class="co"># 第3步：我负责哪些元素?</span></span>
+<span id="cb3-14"><a href="#cb3-14" aria-hidden="true"></a>    offsets <span class="op">=</span> block_start <span class="op">+</span> tl.arange(<span class="dv">0</span>, BLOCK_SIZE)</span>
+<span id="cb3-15"><a href="#cb3-15" aria-hidden="true"></a></span>
+<span id="cb3-16"><a href="#cb3-16" aria-hidden="true"></a>    <span class="co"># 第4步：处理边界（数组可能不够长）</span></span>
+<span id="cb3-17"><a href="#cb3-17" aria-hidden="true"></a>    mask <span class="op">=</span> offsets <span class="op">&lt;</span> n_elements</span>
+<span id="cb3-18"><a href="#cb3-18" aria-hidden="true"></a></span>
+<span id="cb3-19"><a href="#cb3-19" aria-hidden="true"></a>    <span class="co"># 第5步：从显存读取</span></span>
+<span id="cb3-20"><a href="#cb3-20" aria-hidden="true"></a>    x <span class="op">=</span> tl.load(x_ptr <span class="op">+</span> offsets, mask<span class="op">=</span>mask)</span>
+<span id="cb3-21"><a href="#cb3-21" aria-hidden="true"></a></span>
+<span id="cb3-22"><a href="#cb3-22" aria-hidden="true"></a>    <span class="co"># 第6步：计算</span></span>
+<span id="cb3-23"><a href="#cb3-23" aria-hidden="true"></a>    y <span class="op">=</span> x <span class="op">+</span> <span class="dv">1</span></span>
+<span id="cb3-24"><a href="#cb3-24" aria-hidden="true"></a></span>
+<span id="cb3-25"><a href="#cb3-25" aria-hidden="true"></a>    <span class="co"># 第7步：写回显存</span></span>
+<span id="cb3-26"><a href="#cb3-26" aria-hidden="true"></a>    tl.store(y_ptr <span class="op">+</span> offsets, y, mask<span class="op">=</span>mask)</span></code></pre></div>
+<h3 id="逐行解析">2.2 逐行解析</h3>
+<table>
+<thead>
+<tr class="header">
+<th>代码</th>
+<th>作用</th>
+<th>类比</th>
+</tr>
+</thead>
+<tbody>
+<tr class="odd">
+<td><code>@triton.jit</code></td>
+<td>标记这是一个 GPU kernel</td>
+<td>“以下代码在 GPU 上运行”</td>
+</tr>
+<tr class="even">
+<td><code>pid = tl.program_id(axis=0)</code></td>
+<td>获取当前 block 的编号 (0, 1, 2, …)</td>
+<td>“我是第几号流水线”</td>
+</tr>
+<tr class="odd">
+<td><code>block_start = pid * BLOCK_SIZE</code></td>
+<td>计算这个 block 的起始位置</td>
+<td>“我从第几个元素开始”</td>
+</tr>
+<tr class="even">
+<td><code>tl.arange(0, BLOCK_SIZE)</code></td>
+<td>生成 <code>[0, 1, 2, ..., BLOCK_SIZE-1]</code></td>
+<td>“我负责这一批的偏移量”</td>
+</tr>
+<tr class="odd">
+<td><code>mask = offsets &lt; n_elements</code></td>
+<td>处理边界：如果数组只有 5000 个元素，第 5001-6000 个位置不处理</td>
+<td>“别越界！”</td>
+</tr>
+<tr class="even">
+<td><code>tl.load()</code></td>
+<td>从全局内存 (显存) 读取数据</td>
+<td>“从仓库拿货”</td>
+</tr>
+<tr class="odd">
+<td><code>tl.store()</code></td>
+<td>写回全局内存</td>
+<td>“把成品放回仓库”</td>
+</tr>
+</tbody>
+</table>
+<h3 id="关键概念block_size-和-constexpr">2.3 关键概念：BLOCK_SIZE 和 constexpr</h3>
+<div class="sourceCode" id="cb4"><pre class="sourceCode python"><code class="sourceCode python"><span id="cb4-1"><a href="#cb4-1" aria-hidden="true"></a>BLOCK_SIZE: tl.constexpr</span></code></pre></div>
+<ul>
+<li><code>tl.constexpr</code> 告诉 Triton：<strong>这是一个编译期常量</strong></li>
+<li>Triton 编译器会用它做优化</li>
+<li>BLOCK_SIZE 必须是 <strong>2 的幂</strong>（128, 256, 512, 1024…）</li>
+<li>为什么？因为 Triton 用 power-of-2 来生成高效的 mask 和内存访问模式</li>
+</ul>
+<p><strong>选多大的 BLOCK_SIZE？</strong> - 太小：kernel 启动开销占比大 - 太大：每个 block 寄存器压力太大 - <strong>1024 是一个安全的起点</strong></p>
+<hr />
+<h2 id="启动-kernelgrid-配置">3. 启动 Kernel：Grid 配置</h2>
+<h3 id="计算需要多少个-block">3.1 计算需要多少个 block</h3>
+<div class="sourceCode" id="cb5"><pre class="sourceCode python"><code class="sourceCode python"><span id="cb5-1"><a href="#cb5-1" aria-hidden="true"></a>n_elements <span class="op">=</span> <span class="dv">5000</span></span>
+<span id="cb5-2"><a href="#cb5-2" aria-hidden="true"></a>BLOCK_SIZE <span class="op">=</span> <span class="dv">1024</span></span>
+<span id="cb5-3"><a href="#cb5-3" aria-hidden="true"></a></span>
+<span id="cb5-4"><a href="#cb5-4" aria-hidden="true"></a><span class="co"># 需要几个 block?</span></span>
+<span id="cb5-5"><a href="#cb5-5" aria-hidden="true"></a>num_blocks <span class="op">=</span> triton.cdiv(n_elements, BLOCK_SIZE)</span>
+<span id="cb5-6"><a href="#cb5-6" aria-hidden="true"></a><span class="co"># triton.cdiv = ceiling division = ceil(5000/1024) = 5</span></span></code></pre></div>
+<table>
+<thead>
+<tr class="header">
+<th>n_elements</th>
+<th>BLOCK_SIZE</th>
+<th>num_blocks</th>
+</tr>
+</thead>
+<tbody>
+<tr class="odd">
+<td>5000</td>
+<td>1024</td>
+<td>5</td>
+</tr>
+<tr class="even">
+<td>10000</td>
+<td>1024</td>
+<td>10</td>
+</tr>
+<tr class="odd">
+<td>1024</td>
+<td>1024</td>
+<td>1</td>
+</tr>
+</tbody>
+</table>
+<h3 id="启动语法">3.2 启动语法</h3>
+<div class="sourceCode" id="cb6"><pre class="sourceCode python"><code class="sourceCode python"><span id="cb6-1"><a href="#cb6-1" aria-hidden="true"></a><span class="co"># 语法: kernel_name[(grid_config)](参数列表)</span></span>
+<span id="cb6-2"><a href="#cb6-2" aria-hidden="true"></a>hello_kernel[(num_blocks,)](x, y, n_elements, BLOCK_SIZE<span class="op">=</span>BLOCK_SIZE)</span></code></pre></div>
+<p><code>(num_blocks,)</code> 是一个 tuple，表示 Grid 有 <code>num_blocks</code> 个 block。</p>
+<ul>
+<li>1D Grid：<code>(num_blocks,)</code> — 一维排列</li>
+<li>2D Grid：<code>(num_rows, num_cols)</code> — 二维排列（用于矩阵）</li>
+<li>3D Grid：<code>(nx, ny, nz)</code> — 三维排列</li>
+</ul>
+<h3 id="包装函数">3.3 包装函数</h3>
+<p>Triton kernel 不能直接被 Python 调用，需要包装：</p>
+<div class="sourceCode" id="cb7"><pre class="sourceCode python"><code class="sourceCode python"><span id="cb7-1"><a href="#cb7-1" aria-hidden="true"></a><span class="kw">def</span> hello_wrapper(x: torch.Tensor) <span class="op">-&gt;</span> torch.Tensor:</span>
+<span id="cb7-2"><a href="#cb7-2" aria-hidden="true"></a>    <span class="cf">assert</span> x.is_cuda, <span class="st">&quot;输入必须在 GPU 上&quot;</span></span>
+<span id="cb7-3"><a href="#cb7-3" aria-hidden="true"></a>    <span class="cf">assert</span> x.is_contiguous(), <span class="st">&quot;输入必须是连续的&quot;</span></span>
+<span id="cb7-4"><a href="#cb7-4" aria-hidden="true"></a></span>
+<span id="cb7-5"><a href="#cb7-5" aria-hidden="true"></a>    n <span class="op">=</span> x.numel()</span>
+<span id="cb7-6"><a href="#cb7-6" aria-hidden="true"></a>    y <span class="op">=</span> torch.empty_like(x)  <span class="co"># 分配输出张量</span></span>
+<span id="cb7-7"><a href="#cb7-7" aria-hidden="true"></a></span>
+<span id="cb7-8"><a href="#cb7-8" aria-hidden="true"></a>    block_size <span class="op">=</span> <span class="dv">1024</span></span>
+<span id="cb7-9"><a href="#cb7-9" aria-hidden="true"></a>    num_blocks <span class="op">=</span> triton.cdiv(n, block_size)</span>
+<span id="cb7-10"><a href="#cb7-10" aria-hidden="true"></a></span>
+<span id="cb7-11"><a href="#cb7-11" aria-hidden="true"></a>    hello_kernel[(num_blocks,)](x, y, n, BLOCK_SIZE<span class="op">=</span>block_size)</span>
+<span id="cb7-12"><a href="#cb7-12" aria-hidden="true"></a></span>
+<span id="cb7-13"><a href="#cb7-13" aria-hidden="true"></a>    <span class="cf">return</span> y</span></code></pre></div>
+<p><strong>两个重要断言：</strong> - <code>x.is_cuda</code> — Triton 只支持 GPU 张量 - <code>x.is_contiguous()</code> — Triton 要求内存连续，否则 <code>tl.load</code> 无法正确工作</p>
+<hr />
+<h2 id="验证运行你的第一个-kernel">4. 验证：运行你的第一个 Kernel</h2>
+<h3 id="基本测试">4.1 基本测试</h3>
+<div class="sourceCode" id="cb8"><pre class="sourceCode python"><code class="sourceCode python"><span id="cb8-1"><a href="#cb8-1" aria-hidden="true"></a>x <span class="op">=</span> torch.tensor([<span class="fl">1.0</span>, <span class="fl">2.0</span>, <span class="fl">3.0</span>, <span class="fl">4.0</span>, <span class="fl">5.0</span>], device<span class="op">=</span><span class="st">&quot;cuda&quot;</span>)</span>
+<span id="cb8-2"><a href="#cb8-2" aria-hidden="true"></a>y <span class="op">=</span> hello_wrapper(x)</span>
+<span id="cb8-3"><a href="#cb8-3" aria-hidden="true"></a></span>
+<span id="cb8-4"><a href="#cb8-4" aria-hidden="true"></a><span class="co"># 输入:  [1.0, 2.0, 3.0, 4.0, 5.0]</span></span>
+<span id="cb8-5"><a href="#cb8-5" aria-hidden="true"></a><span class="co"># 输出:  [2.0, 3.0, 4.0, 5.0, 6.0]  ✅</span></span></code></pre></div>
+<h3 id="边界测试">4.2 边界测试</h3>
+<div class="sourceCode" id="cb9"><pre class="sourceCode python"><code class="sourceCode python"><span id="cb9-1"><a href="#cb9-1" aria-hidden="true"></a><span class="co"># 非对齐长度：5000 不是 1024 的倍数</span></span>
+<span id="cb9-2"><a href="#cb9-2" aria-hidden="true"></a>x_big <span class="op">=</span> torch.randn(<span class="dv">5000</span>, device<span class="op">=</span><span class="st">&quot;cuda&quot;</span>)</span>
+<span id="cb9-3"><a href="#cb9-3" aria-hidden="true"></a>y_big <span class="op">=</span> hello_wrapper(x_big)</span>
+<span id="cb9-4"><a href="#cb9-4" aria-hidden="true"></a><span class="cf">assert</span> torch.allclose(y_big.cpu(), x_big.cpu() <span class="op">+</span> <span class="dv">1</span>)  <span class="co"># mask 确保边界正确</span></span></code></pre></div>
+<h3 id="看-ptx-代码进阶">4.3 看 PTX 代码（进阶）</h3>
+<p>Triton 编译后会生成 PTX（GPU 汇编语言）：</p>
+<div class="sourceCode" id="cb10"><pre class="sourceCode python"><code class="sourceCode python"><span id="cb10-1"><a href="#cb10-1" aria-hidden="true"></a><span class="im">import</span> os</span>
+<span id="cb10-2"><a href="#cb10-2" aria-hidden="true"></a>os.environ[<span class="st">&quot;TRITON_INTERPRET&quot;</span>] <span class="op">=</span> <span class="st">&quot;0&quot;</span></span>
+<span id="cb10-3"><a href="#cb10-3" aria-hidden="true"></a></span>
+<span id="cb10-4"><a href="#cb10-4" aria-hidden="true"></a><span class="co"># 运行一次以生成 PTX</span></span>
+<span id="cb10-5"><a href="#cb10-5" aria-hidden="true"></a>y <span class="op">=</span> hello_wrapper(x)</span>
+<span id="cb10-6"><a href="#cb10-6" aria-hidden="true"></a></span>
+<span id="cb10-7"><a href="#cb10-7" aria-hidden="true"></a><span class="co"># 查看生成的 PTX</span></span>
+<span id="cb10-8"><a href="#cb10-8" aria-hidden="true"></a>ptx <span class="op">=</span> <span class="bu">list</span>(hello_kernel.cache.values())[<span class="dv">0</span>].asm[<span class="st">&quot;ptx&quot;</span>]</span>
+<span id="cb10-9"><a href="#cb10-9" aria-hidden="true"></a><span class="bu">print</span>(ptx)</span></code></pre></div>
+<p>PTX 中你会看到： - <code>ld.global.f32</code> — 从全局内存加载 - <code>st.global.f32</code> — 写回全局内存 - <code>add.f32</code> — 浮点加法</p>
+<hr />
+<h2 id="动手练习">5. 动手练习</h2>
+<h3 id="练习-1修改-kernel">练习 1：修改 Kernel</h3>
+<p>把 <code>y = x + 1</code> 改成以下操作，验证结果正确性：</p>
+<div class="sourceCode" id="cb11"><pre class="sourceCode python"><code class="sourceCode python"><span id="cb11-1"><a href="#cb11-1" aria-hidden="true"></a><span class="co"># a) y = x * 2</span></span>
+<span id="cb11-2"><a href="#cb11-2" aria-hidden="true"></a><span class="co"># b) y = x ** 2</span></span>
+<span id="cb11-3"><a href="#cb11-3" aria-hidden="true"></a><span class="co"># c) y = torch.sin(x) → 用 tl.sin(x)</span></span></code></pre></div>
+<h3 id="练习-2双输入-kernel">练习 2：双输入 Kernel</h3>
+<p>写一个 <code>add_kernel(a_ptr, b_ptr, c_ptr, ...)</code> 实现 <code>c = a + b</code>：</p>
+<div class="sourceCode" id="cb12"><pre class="sourceCode python"><code class="sourceCode python"><span id="cb12-1"><a href="#cb12-1" aria-hidden="true"></a><span class="at">@triton.jit</span></span>
+<span id="cb12-2"><a href="#cb12-2" aria-hidden="true"></a><span class="kw">def</span> add_kernel(a_ptr, b_ptr, c_ptr, n_elements, BLOCK_SIZE: tl.constexpr):</span>
+<span id="cb12-3"><a href="#cb12-3" aria-hidden="true"></a>    pid <span class="op">=</span> tl.program_id(axis<span class="op">=</span><span class="dv">0</span>)</span>
+<span id="cb12-4"><a href="#cb12-4" aria-hidden="true"></a>    block_start <span class="op">=</span> pid <span class="op">*</span> BLOCK_SIZE</span>
+<span id="cb12-5"><a href="#cb12-5" aria-hidden="true"></a>    offsets <span class="op">=</span> block_start <span class="op">+</span> tl.arange(<span class="dv">0</span>, BLOCK_SIZE)</span>
+<span id="cb12-6"><a href="#cb12-6" aria-hidden="true"></a>    mask <span class="op">=</span> offsets <span class="op">&lt;</span> n_elements</span>
+<span id="cb12-7"><a href="#cb12-7" aria-hidden="true"></a></span>
+<span id="cb12-8"><a href="#cb12-8" aria-hidden="true"></a>    a <span class="op">=</span> tl.load(a_ptr <span class="op">+</span> offsets, mask<span class="op">=</span>mask)</span>
+<span id="cb12-9"><a href="#cb12-9" aria-hidden="true"></a>    b <span class="op">=</span> tl.load(b_ptr <span class="op">+</span> offsets, mask<span class="op">=</span>mask)</span>
+<span id="cb12-10"><a href="#cb12-10" aria-hidden="true"></a>    c <span class="op">=</span> a <span class="op">+</span> b</span>
+<span id="cb12-11"><a href="#cb12-11" aria-hidden="true"></a>    tl.store(c_ptr <span class="op">+</span> offsets, c, mask<span class="op">=</span>mask)</span></code></pre></div>
+<h3 id="练习-3理解-grid">练习 3：理解 Grid</h3>
+<p>思考以下问题：</p>
+<p><strong>Q1：</strong> 如果 <code>n_elements = 2048</code>，<code>BLOCK_SIZE = 1024</code>，会有几个 block 被启动？每个 block 处理哪些元素？</p>
+<p><strong>Q2：</strong> 如果 <code>n_elements = 2049</code>，<code>BLOCK_SIZE = 1024</code>，会发生什么？（提示：最后一个 block 的部分 thread 会被 mask 掉）</p>
+<p><strong>Q3：</strong> 为什么 <code>mask = offsets &lt; n_elements</code> 而不是 <code>mask = block_start &lt; n_elements</code>？</p>
+<details>
+<p><summary>点击查看答案</summary></p>
+<p><strong>Q1：</strong> 2 个 block。Block 0 处理 [0, 1023]，Block 1 处理 [1024, 2047]。</p>
+<p><strong>Q2：</strong> 3 个 block。Block 0: [0-1023]，Block 1: [1024-2047]，Block 2: [2048]（只有 1 个元素有效，其他 1023 个被 mask 跳过）。</p>
+<p><strong>Q3：</strong> 因为每个 thread 处理的是 <code>offsets</code> 中的单个元素，必须对每个元素单独判断是否越界。<code>block_start &lt; n_elements</code> 只判断了 block 的起始位置，但 block 内的某些元素可能已经越界。</p>
+</details>
+<hr />
+<h2 id="核心公式总结">6. 核心公式总结</h2>
+<pre><code>Triton 元素级操作模板:
+
+  pid = tl.program_id(axis=0)
+  offsets = pid * BLOCK_SIZE + tl.arange(0, BLOCK_SIZE)
+  mask = offsets &lt; n_elements
+
+  x = tl.load(ptr + offsets, mask=mask)   # 读
+  y = your_computation(x)                  # 算
+  tl.store(ptr + offsets, y, mask=mask)   # 写</code></pre>
+<hr />
+<h2 id="下一章预告">7. 下一章预告</h2>
+<p>下一章，我们将用这个模板实现更多激活函数（ReLU, GeLU, Silu），并和 PyTorch 原生实现做性能对比，直观感受 Triton 的价值。</p>
+<p><strong>运行本章代码：</strong> <code>python 01_introduction.py</code></p>

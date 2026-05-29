@@ -1,0 +1,327 @@
+<h1 id="第六章flashattention-backward-重计算策略">第六章：FlashAttention Backward — 重计算策略</h1>
+<blockquote>
+<p><strong>你将学到什么：</strong> - 理解 Recomputation（重计算）为什么能省显存 - 掌握 FlashAttention 反向传播的四个公式 - 理解为什么 dK 和 dV 需要累加而 dQ 不需要 - 用 PyTorch 验证梯度正确性 - 实现 Triton Backward kernel 的框架</p>
+<p><strong>前置知识：</strong> 第五章（FlashAttention Forward） <strong>预计时间：</strong> 60 分钟 <strong>最终成果：</strong> PyTorch 验证的 Backward + Triton kernel 框架</p>
+</blockquote>
+<hr />
+<h2 id="为什么需要-recomputation">1. 为什么需要 “Recomputation”？</h2>
+<h3 id="标准-attention-的反向传播">1.1 标准 Attention 的反向传播</h3>
+<p>标准 Attention 的反向传播需要 P 矩阵：</p>
+<div class="sourceCode" id="cb1"><pre class="sourceCode python"><code class="sourceCode python"><span id="cb1-1"><a href="#cb1-1" aria-hidden="true"></a><span class="co"># Forward</span></span>
+<span id="cb1-2"><a href="#cb1-2" aria-hidden="true"></a>S <span class="op">=</span> Q <span class="op">@</span> K<span class="op">^</span>T <span class="op">/</span> √D          <span class="co"># (B, N, N)</span></span>
+<span id="cb1-3"><a href="#cb1-3" aria-hidden="true"></a>P <span class="op">=</span> softmax(S)             <span class="co"># (B, N, N) ← 这个！</span></span>
+<span id="cb1-4"><a href="#cb1-4" aria-hidden="true"></a>O <span class="op">=</span> P <span class="op">@</span> V                  <span class="co"># (B, N, D)</span></span>
+<span id="cb1-5"><a href="#cb1-5" aria-hidden="true"></a></span>
+<span id="cb1-6"><a href="#cb1-6" aria-hidden="true"></a><span class="co"># Backward</span></span>
+<span id="cb1-7"><a href="#cb1-7" aria-hidden="true"></a>dV <span class="op">=</span> P<span class="op">^</span>T <span class="op">@</span> dO              <span class="co"># 需要 P</span></span>
+<span id="cb1-8"><a href="#cb1-8" aria-hidden="true"></a>dQ <span class="op">=</span> ... <span class="op">@</span> K               <span class="co"># 需要 dS = P * (dP - D)</span></span>
+<span id="cb1-9"><a href="#cb1-9" aria-hidden="true"></a>dK <span class="op">=</span> ... <span class="op">@</span> Q               <span class="co"># 需要 dS</span></span></code></pre></div>
+<p><strong>问题：</strong> P 是 N×N 矩阵，和 S 一样大。如果 Forward 不存 P，Backward 就没法做。</p>
+<h3 id="flashattention-的策略不存-p反向时重算">1.2 FlashAttention 的策略：不存 P，反向时重算</h3>
+<pre><code>Forward:  不保存 P → 省 N² 显存
+Backward: 重新计算 P → 不用额外显存
+
+P_ij_recompute = exp(S_ij - m_i) / l_i</code></pre>
+<p><strong>关键洞察：</strong> P 不是任意的，它是由 S 通过 softmax 公式<strong>确定性计算</strong>的。 既然 S = Q @ K^T / √D，而 Q, K 都保存了，那 P 可以原地重新计算！</p>
+<h3 id="代价多了一次-s-q-kt-的计算">1.3 代价：多了一次 S = Q @ K^T 的计算</h3>
+<table>
+<thead>
+<tr class="header">
+<th>方法</th>
+<th>显存</th>
+<th>计算</th>
+</tr>
+</thead>
+<tbody>
+<tr class="odd">
+<td>标准 Attention</td>
+<td>O(N²) (存 P)</td>
+<td>1 次 S = Q@K^T</td>
+</tr>
+<tr class="even">
+<td>FlashAttention</td>
+<td><strong>O(N)</strong> (不存 P)</td>
+<td><strong>2 次 S = Q@K^T</strong> (Forward + Backward)</td>
+</tr>
+</tbody>
+</table>
+<p><strong>显存换计算：</strong> 这是 FlashAttention 的核心 tradeoff。</p>
+<hr />
+<h2 id="反向传播公式推导">2. 反向传播公式推导</h2>
+<h3 id="四个核心公式">2.1 四个核心公式</h3>
+<pre><code>输入: 前向传播的 Q, K, V, O, L, M
+梯度输入: dO (Loss 对 O 的梯度)
+
+输出: dQ, dK, dV
+
+公式:
+  D_i = Σⱼ (Oᵢⱼ × dOᵢⱼ)              ← (1) 预计算辅助量
+  dV = P^T @ dO                         ← (2) V 的梯度
+  dP = dO @ V^T                         ← (3) 中间量
+  dS = P ⊙ (dP - D)                     ← (4) S 的梯度
+  dQ = dS @ K × scale                   ← (5) Q 的梯度
+  dK = dS^T @ Q × scale                 ← (6) K 的梯度</code></pre>
+<h3 id="公式-1-为什么需要-d_i">2.2 公式 (1): 为什么需要 D_i？</h3>
+<pre><code>D_i = (dO × O).sum(dim=-1)</code></pre>
+<p>这是 Softmax 反向传播的<strong>关键辅助量</strong>。</p>
+<p><strong>直觉理解：</strong> - Softmax 的梯度公式是 <code>dS = P * (dP - D)</code> - 其中 <code>D_i = Σⱼ Oᵢⱼ × dOᵢⱼ</code> 是“输出与其梯度的逐元素乘积之和” - 这个量保证了 softmax 的梯度满足概率分布的约束（梯度之和为零）</p>
+<h3 id="公式-2-6-数据流图">2.3 公式 (2)-(6): 数据流图</h3>
+<pre><code>dO ─┬─→ P^T @ dO ──────────────→ dV
+    │
+    └─→ dO @ V^T ─→ dP
+                      │
+                      ├─→ dP - D ─→ P * (dP - D) ─→ dS
+                      │                                         │
+                      │                                         ├─→ dS @ K × scale ─→ dQ
+                      │                                         └─→ dS^T @ Q × scale ─→ dK
+                      └── (已用 dV 的 K)</code></pre>
+<h3 id="公式-4-的-softmax-梯度">2.4 公式 (4) 的 Softmax 梯度</h3>
+<pre><code>dS = P * (dP - D)
+
+这是 softmax 的已知反向传播公式。推导：
+  ∂loss/∂Sᵢⱼ = ∂loss/∂Oᵢⱼ × ∂Oᵢⱼ/∂Sᵢⱼ
+  Oᵢⱼ = Σₖ Pᵢₖ × Vₖⱼ
+  ∂Oᵢⱼ/∂Sᵢⱼ = Pᵢⱼ - Pᵢⱼ × Dᵢ
+             = Pᵢⱼ × (1 - Dᵢ)
+
+简化后: dS = P * (dP - D)</code></pre>
+<hr />
+<h2 id="pytorch-实现验证">3. PyTorch 实现验证</h2>
+<h3 id="为什么先用-pytorch-验证">3.1 为什么先用 PyTorch 验证？</h3>
+<p>写 Triton kernel 之前，先用 PyTorch 实现并验证：</p>
+<div class="sourceCode" id="cb7"><pre class="sourceCode python"><code class="sourceCode python"><span id="cb7-1"><a href="#cb7-1" aria-hidden="true"></a><span class="kw">def</span> flash_attention_backward_pytorch(q, k, v, o, l, m, do, causal<span class="op">=</span><span class="va">False</span>, block_size<span class="op">=</span><span class="dv">64</span>):</span>
+<span id="cb7-2"><a href="#cb7-2" aria-hidden="true"></a>    B, N, D <span class="op">=</span> q.shape</span>
+<span id="cb7-3"><a href="#cb7-3" aria-hidden="true"></a>    scale <span class="op">=</span> <span class="fl">1.0</span> <span class="op">/</span> math.sqrt(D)</span>
+<span id="cb7-4"><a href="#cb7-4" aria-hidden="true"></a></span>
+<span id="cb7-5"><a href="#cb7-5" aria-hidden="true"></a>    dq <span class="op">=</span> torch.zeros_like(q)</span>
+<span id="cb7-6"><a href="#cb7-6" aria-hidden="true"></a>    dk <span class="op">=</span> torch.zeros_like(k)</span>
+<span id="cb7-7"><a href="#cb7-7" aria-hidden="true"></a>    dv <span class="op">=</span> torch.zeros_like(v)</span>
+<span id="cb7-8"><a href="#cb7-8" aria-hidden="true"></a></span>
+<span id="cb7-9"><a href="#cb7-9" aria-hidden="true"></a>    <span class="co"># 预计算 D</span></span>
+<span id="cb7-10"><a href="#cb7-10" aria-hidden="true"></a>    D_i <span class="op">=</span> (do <span class="op">*</span> o).<span class="bu">sum</span>(dim<span class="op">=-</span><span class="dv">1</span>)  <span class="co"># (B, N)</span></span>
+<span id="cb7-11"><a href="#cb7-11" aria-hidden="true"></a></span>
+<span id="cb7-12"><a href="#cb7-12" aria-hidden="true"></a>    <span class="co"># 与 forward 完全相同的分块循环</span></span>
+<span id="cb7-13"><a href="#cb7-13" aria-hidden="true"></a>    <span class="cf">for</span> i <span class="kw">in</span> <span class="bu">range</span>(<span class="dv">0</span>, N, block_size):</span>
+<span id="cb7-14"><a href="#cb7-14" aria-hidden="true"></a>        i_end <span class="op">=</span> <span class="bu">min</span>(i <span class="op">+</span> block_size, N)</span>
+<span id="cb7-15"><a href="#cb7-15" aria-hidden="true"></a>        qi <span class="op">=</span> q[:, i:i_end, :]</span>
+<span id="cb7-16"><a href="#cb7-16" aria-hidden="true"></a>        doi <span class="op">=</span> do[:, i:i_end, :]</span>
+<span id="cb7-17"><a href="#cb7-17" aria-hidden="true"></a>        li <span class="op">=</span> l[:, i:i_end].unsqueeze(<span class="op">-</span><span class="dv">1</span>)</span>
+<span id="cb7-18"><a href="#cb7-18" aria-hidden="true"></a>        mi <span class="op">=</span> m[:, i:i_end].unsqueeze(<span class="op">-</span><span class="dv">1</span>)</span>
+<span id="cb7-19"><a href="#cb7-19" aria-hidden="true"></a>        di <span class="op">=</span> D_i[:, i:i_end].unsqueeze(<span class="op">-</span><span class="dv">1</span>)</span>
+<span id="cb7-20"><a href="#cb7-20" aria-hidden="true"></a></span>
+<span id="cb7-21"><a href="#cb7-21" aria-hidden="true"></a>        <span class="cf">for</span> j <span class="kw">in</span> <span class="bu">range</span>(<span class="dv">0</span>, N, block_size):</span>
+<span id="cb7-22"><a href="#cb7-22" aria-hidden="true"></a>            j_end <span class="op">=</span> <span class="bu">min</span>(j <span class="op">+</span> block_size, N)</span>
+<span id="cb7-23"><a href="#cb7-23" aria-hidden="true"></a>            kj <span class="op">=</span> k[:, j:j_end, :]</span>
+<span id="cb7-24"><a href="#cb7-24" aria-hidden="true"></a>            vj <span class="op">=</span> v[:, j:j_end, :]</span>
+<span id="cb7-25"><a href="#cb7-25" aria-hidden="true"></a></span>
+<span id="cb7-26"><a href="#cb7-26" aria-hidden="true"></a>            <span class="co"># Recomputation</span></span>
+<span id="cb7-27"><a href="#cb7-27" aria-hidden="true"></a>            s_ij <span class="op">=</span> torch.einsum(<span class="st">&#39;...qd,...kd-&gt;...qk&#39;</span>, qi, kj) <span class="op">*</span> scale</span>
+<span id="cb7-28"><a href="#cb7-28" aria-hidden="true"></a></span>
+<span id="cb7-29"><a href="#cb7-29" aria-hidden="true"></a>            <span class="cf">if</span> causal:</span>
+<span id="cb7-30"><a href="#cb7-30" aria-hidden="true"></a>                row_idx <span class="op">=</span> torch.arange(i, i_end)[:, <span class="va">None</span>]</span>
+<span id="cb7-31"><a href="#cb7-31" aria-hidden="true"></a>                col_idx <span class="op">=</span> torch.arange(j, j_end)[<span class="va">None</span>, :]</span>
+<span id="cb7-32"><a href="#cb7-32" aria-hidden="true"></a>                causal_mask <span class="op">=</span> row_idx <span class="op">&gt;=</span> col_idx</span>
+<span id="cb7-33"><a href="#cb7-33" aria-hidden="true"></a>                s_ij <span class="op">=</span> s_ij.masked_fill(<span class="op">~</span>causal_mask, <span class="bu">float</span>(<span class="st">&#39;-inf&#39;</span>))</span>
+<span id="cb7-34"><a href="#cb7-34" aria-hidden="true"></a></span>
+<span id="cb7-35"><a href="#cb7-35" aria-hidden="true"></a>            <span class="co"># P_ij = exp(S_ij - m_i) / l_i</span></span>
+<span id="cb7-36"><a href="#cb7-36" aria-hidden="true"></a>            p_ij <span class="op">=</span> torch.exp(s_ij <span class="op">-</span> mi) <span class="op">/</span> li</span>
+<span id="cb7-37"><a href="#cb7-37" aria-hidden="true"></a></span>
+<span id="cb7-38"><a href="#cb7-38" aria-hidden="true"></a>            <span class="co"># dV_j += P^T @ dO</span></span>
+<span id="cb7-39"><a href="#cb7-39" aria-hidden="true"></a>            dv[:, j:j_end, :] <span class="op">+=</span> torch.einsum(<span class="st">&#39;...qk,...qd-&gt;...kd&#39;</span>, p_ij, doi)</span>
+<span id="cb7-40"><a href="#cb7-40" aria-hidden="true"></a></span>
+<span id="cb7-41"><a href="#cb7-41" aria-hidden="true"></a>            <span class="co"># dP = dO @ V^T</span></span>
+<span id="cb7-42"><a href="#cb7-42" aria-hidden="true"></a>            dp_ij <span class="op">=</span> torch.einsum(<span class="st">&#39;...qd,...kd-&gt;...qk&#39;</span>, doi, vj)</span>
+<span id="cb7-43"><a href="#cb7-43" aria-hidden="true"></a></span>
+<span id="cb7-44"><a href="#cb7-44" aria-hidden="true"></a>            <span class="co"># dS = P * (dP - D)</span></span>
+<span id="cb7-45"><a href="#cb7-45" aria-hidden="true"></a>            ds_ij <span class="op">=</span> p_ij <span class="op">*</span> (dp_ij <span class="op">-</span> di)</span>
+<span id="cb7-46"><a href="#cb7-46" aria-hidden="true"></a></span>
+<span id="cb7-47"><a href="#cb7-47" aria-hidden="true"></a>            <span class="co"># dQ += dS @ K * scale</span></span>
+<span id="cb7-48"><a href="#cb7-48" aria-hidden="true"></a>            dq[:, i:i_end, :] <span class="op">+=</span> torch.einsum(<span class="st">&#39;...qk,...kd-&gt;...qd&#39;</span>, ds_ij, kj) <span class="op">*</span> scale</span>
+<span id="cb7-49"><a href="#cb7-49" aria-hidden="true"></a></span>
+<span id="cb7-50"><a href="#cb7-50" aria-hidden="true"></a>            <span class="co"># dK += dS^T @ Q * scale</span></span>
+<span id="cb7-51"><a href="#cb7-51" aria-hidden="true"></a>            dk[:, j:j_end, :] <span class="op">+=</span> torch.einsum(<span class="st">&#39;...qk,...qd-&gt;...kd&#39;</span>, ds_ij, qi) <span class="op">*</span> scale</span>
+<span id="cb7-52"><a href="#cb7-52" aria-hidden="true"></a></span>
+<span id="cb7-53"><a href="#cb7-53" aria-hidden="true"></a>    <span class="cf">return</span> dq, dk, dv</span></code></pre></div>
+<h3 id="验证方法">3.2 验证方法</h3>
+<div class="sourceCode" id="cb8"><pre class="sourceCode python"><code class="sourceCode python"><span id="cb8-1"><a href="#cb8-1" aria-hidden="true"></a><span class="co"># 1. PyTorch 标准 attention 做反向传播</span></span>
+<span id="cb8-2"><a href="#cb8-2" aria-hidden="true"></a>q <span class="op">=</span> torch.randn(B, N, D, requires_grad<span class="op">=</span><span class="va">True</span>)</span>
+<span id="cb8-3"><a href="#cb8-3" aria-hidden="true"></a>k <span class="op">=</span> torch.randn(B, N, D, requires_grad<span class="op">=</span><span class="va">True</span>)</span>
+<span id="cb8-4"><a href="#cb8-4" aria-hidden="true"></a>v <span class="op">=</span> torch.randn(B, N, D, requires_grad<span class="op">=</span><span class="va">True</span>)</span>
+<span id="cb8-5"><a href="#cb8-5" aria-hidden="true"></a>do <span class="op">=</span> torch.randn(B, N, D)</span>
+<span id="cb8-6"><a href="#cb8-6" aria-hidden="true"></a></span>
+<span id="cb8-7"><a href="#cb8-7" aria-hidden="true"></a><span class="co"># 标准 forward</span></span>
+<span id="cb8-8"><a href="#cb8-8" aria-hidden="true"></a>s <span class="op">=</span> torch.einsum(<span class="st">&#39;...qd,...kd-&gt;...qk&#39;</span>, q, k) <span class="op">*</span> scale</span>
+<span id="cb8-9"><a href="#cb8-9" aria-hidden="true"></a>p <span class="op">=</span> torch.softmax(s, dim<span class="op">=-</span><span class="dv">1</span>)</span>
+<span id="cb8-10"><a href="#cb8-10" aria-hidden="true"></a>o <span class="op">=</span> p <span class="op">@</span> v</span>
+<span id="cb8-11"><a href="#cb8-11" aria-hidden="true"></a>o.backward(do)</span>
+<span id="cb8-12"><a href="#cb8-12" aria-hidden="true"></a></span>
+<span id="cb8-13"><a href="#cb8-13" aria-hidden="true"></a>dq_std, dk_std, dv_std <span class="op">=</span> q.grad, k.grad, v.grad</span>
+<span id="cb8-14"><a href="#cb8-14" aria-hidden="true"></a></span>
+<span id="cb8-15"><a href="#cb8-15" aria-hidden="true"></a><span class="co"># 2. FlashAttention 反向传播</span></span>
+<span id="cb8-16"><a href="#cb8-16" aria-hidden="true"></a>dq_fa, dk_fa, dv_fa <span class="op">=</span> flash_attention_backward_pytorch(q, k, v, o, l, m, do)</span>
+<span id="cb8-17"><a href="#cb8-17" aria-hidden="true"></a></span>
+<span id="cb8-18"><a href="#cb8-18" aria-hidden="true"></a><span class="co"># 3. 对比</span></span>
+<span id="cb8-19"><a href="#cb8-19" aria-hidden="true"></a><span class="bu">print</span>(<span class="ss">f&quot;dQ diff: </span><span class="sc">{</span>(dq_std <span class="op">-</span> dq_fa)<span class="sc">.</span><span class="bu">abs</span>()<span class="sc">.</span><span class="bu">max</span>()<span class="sc">:.2e}</span><span class="ss">&quot;</span>)</span>
+<span id="cb8-20"><a href="#cb8-20" aria-hidden="true"></a><span class="bu">print</span>(<span class="ss">f&quot;dK diff: </span><span class="sc">{</span>(dk_std <span class="op">-</span> dk_fa)<span class="sc">.</span><span class="bu">abs</span>()<span class="sc">.</span><span class="bu">max</span>()<span class="sc">:.2e}</span><span class="ss">&quot;</span>)</span>
+<span id="cb8-21"><a href="#cb8-21" aria-hidden="true"></a><span class="bu">print</span>(<span class="ss">f&quot;dV diff: </span><span class="sc">{</span>(dv_std <span class="op">-</span> dv_fa)<span class="sc">.</span><span class="bu">abs</span>()<span class="sc">.</span><span class="bu">max</span>()<span class="sc">:.2e}</span><span class="ss">&quot;</span>)</span>
+<span id="cb8-22"><a href="#cb8-22" aria-hidden="true"></a><span class="co"># 预期: 所有 &lt; 1e-3</span></span></code></pre></div>
+<hr />
+<h2 id="triton-backward-kernel-框架">4. Triton Backward Kernel 框架</h2>
+<h3 id="与-forward-的对比">4.1 与 Forward 的对比</h3>
+<table>
+<thead>
+<tr class="header">
+<th></th>
+<th>Forward</th>
+<th>Backward</th>
+</tr>
+</thead>
+<tbody>
+<tr class="odd">
+<td><strong>输入</strong></td>
+<td>Q, K, V</td>
+<td>Q, K, V, O, L, M, dO</td>
+</tr>
+<tr class="even">
+<td><strong>输出</strong></td>
+<td>O, L</td>
+<td>dQ, dK, dV</td>
+</tr>
+<tr class="odd">
+<td><strong>P 来源</strong></td>
+<td>P = exp(S-M)/L (计算中)</td>
+<td>P = exp(S-m)/l (重计算)</td>
+</tr>
+<tr class="even">
+<td><strong>累加方式</strong></td>
+<td>O += P@V</td>
+<td>dK, dV 需要 += (多个 Q block 共享)</td>
+</tr>
+</tbody>
+</table>
+<h3 id="关键区别为什么-dk-和-dv-要累加">4.2 关键区别：为什么 dK 和 dV 要累加？</h3>
+<pre><code>Forward:
+  Block(0): 处理 Q[0:64]   → 写 O[0:64]
+  Block(1): 处理 Q[64:128] → 写 O[64:128]
+  → 每个 O 位置只被一个 block 写
+
+Backward:
+  Block(0): 处理 Q[0:64]   → dK += ..., dV += ...
+  Block(1): 处理 Q[64:128] → dK += ..., dV += ...
+  → 每个 KV 位置被多个 Q block 用到，需要累加!</code></pre>
+<p><strong>类比：</strong> - Forward: 每个工人负责自己的输出区域 - Backward: 每个工人贡献到公共的 KV 区域，需要汇总</p>
+<h3 id="完整框架代码">4.3 完整框架代码</h3>
+<p>完整代码见 <code>06_backward.py</code> 中的 <code>_flash_attn_bwd_kernel</code>。</p>
+<p><strong>TODO 实现清单：</strong></p>
+<pre><code>1. 在 wrapper 中预计算 D = (dO * O).sum(dim=-1, keepdim=True)
+2. 把 D 作为参数传给 kernel
+3. 在 kernel 中:
+   a. 加载 Q_i, O_i, L_i, M_i, dO_i
+   b. for k_block in range(cdiv(Nk, K_BLOCK)):
+      - 加载 K_j, V_j
+      - S_ij = tl.dot(Q_i, K_j.T) * scale
+      - (causal mask)
+      - P_ij = tl.exp(S_ij - M_i) / L_i
+      - dP_ij = tl.dot(dO_cast, V_j.T)
+      - dS_ij = P_ij * (dP_ij - D_i)
+      - dQ_acc += tl.dot(dS_ij, K_j) * scale
+      - dV += tl.dot(P_ij.T, dO_i)
+      - dK += tl.dot(dS_ij.T, Q_i) * scale
+      - K_block_ptr.advance()
+   c. 写回 dQ (累加后的结果)
+   d. 写回 dK, dV (需要 atomicAdd 或用多个 kernel)</code></pre>
+<h3 id="难点dk-和-dv-的累加">4.4 难点：dK 和 dV 的累加</h3>
+<p><strong>问题：</strong> Triton 的 <code>tl.store</code> 是原子写还是累加？</p>
+<p><strong>答案：</strong> <code>tl.store</code> 是<strong>覆盖写</strong>，不是累加。</p>
+<p><strong>解决方案：</strong> 有两种方法</p>
+<ol type="1">
+<li><strong>分两次 kernel：</strong> 第一次清零 dK, dV，第二次累加</li>
+<li><strong>用 <code>tl.atomic_add</code>：</strong> Triton 原子的累加操作</li>
+</ol>
+<p>推荐方法 1，更简单可靠：</p>
+<div class="sourceCode" id="cb11"><pre class="sourceCode python"><code class="sourceCode python"><span id="cb11-1"><a href="#cb11-1" aria-hidden="true"></a><span class="co"># Wrapper 中:</span></span>
+<span id="cb11-2"><a href="#cb11-2" aria-hidden="true"></a>dK <span class="op">=</span> torch.zeros_like(K)</span>
+<span id="cb11-3"><a href="#cb11-3" aria-hidden="true"></a>dV <span class="op">=</span> torch.zeros_like(V)</span>
+<span id="cb11-4"><a href="#cb11-4" aria-hidden="true"></a></span>
+<span id="cb11-5"><a href="#cb11-5" aria-hidden="true"></a><span class="co"># Kernel 中用 tl.store 写回</span></span>
+<span id="cb11-6"><a href="#cb11-6" aria-hidden="true"></a><span class="co"># (因为 dK, dV 初始为 0，store 覆盖 = 累加)</span></span></code></pre></div>
+<hr />
+<h2 id="调试指南">5. 调试指南</h2>
+<h3 id="最常见的错误">5.1 最常见的错误</h3>
+<table>
+<thead>
+<tr class="header">
+<th>错误</th>
+<th>现象</th>
+<th>修复</th>
+</tr>
+</thead>
+<tbody>
+<tr class="odd">
+<td>D_i 用了未归一化的 O</td>
+<td>dQ 偏差大</td>
+<td>用 <code>O_normalized = O / L</code></td>
+</tr>
+<tr class="even">
+<td>Causal mask 方向反</td>
+<td>causal 模式结果错</td>
+<td><code>row &gt;= col</code> 不是 <code>row &lt;= col</code></td>
+</tr>
+<tr class="odd">
+<td>P_ij 用 M_new 而非 M_i</td>
+<td>梯度偏差</td>
+<td>重计算用 forward 保存的 M_i</td>
+</tr>
+<tr class="even">
+<td>scale 是 1/D 而非 1/√D</td>
+<td>所有梯度偏差</td>
+<td><code>scale = 1.0 / sqrt(D)</code></td>
+</tr>
+<tr class="odd">
+<td>dK/dV 没有初始化 zeros</td>
+<td>结果随机</td>
+<td><code>dK = torch.zeros_like(K)</code></td>
+</tr>
+</tbody>
+</table>
+<h3 id="调试流程">5.2 调试流程</h3>
+<pre><code>1. 先用小规模数据 (B=1, N=64, D=32)
+2. 对比 PyTorch 标准 attention 的梯度
+3. 逐层验证:
+   - D_i 是否正确?
+   - P_ij 重计算是否正确?
+   - dV 是否正确?
+   - dQ, dK 是否正确?
+4. 逐步增大规模</code></pre>
+<hr />
+<h2 id="核心公式总结">6. 核心公式总结</h2>
+<pre><code>Backward:
+  D = (dO × O).sum(dim=-1, keepdim=True)  ← 预计算
+
+  FOR 每个 Q block i, KV block j:
+    S_ij = Q_i @ K_j^T × scale
+    P_ij = exp(S_ij - m_i) / l_i          ← 重计算!
+    dV_j += P_ij^T @ dO_i
+    dP = dO_i @ V_j^T
+    dS = P ⊙ (dP - D)
+    dQ_i += dS @ K_j × scale
+    dK_j += dS^T @ Q_i × scale</code></pre>
+<hr />
+<h2 id="练习">7. 练习</h2>
+<h3 id="练习-1补全-backward-kernel">练习 1：补全 Backward Kernel</h3>
+<p><code>06_backward.py</code> 中的 <code>_flash_attn_bwd_kernel</code> 是框架代码，补全 TODO 部分。</p>
+<h3 id="练习-2理解-recomputation-的代价">练习 2：理解 Recomputation 的代价</h3>
+<div class="sourceCode" id="cb14"><pre class="sourceCode python"><code class="sourceCode python"><span id="cb14-1"><a href="#cb14-1" aria-hidden="true"></a><span class="co"># 标准 Attention: 1 次 matmul + 存 P (O(N²) 显存)</span></span>
+<span id="cb14-2"><a href="#cb14-2" aria-hidden="true"></a><span class="co"># FlashAttention: 2 次 matmul + 不存 P (O(N) 显存)</span></span>
+<span id="cb14-3"><a href="#cb14-3" aria-hidden="true"></a></span>
+<span id="cb14-4"><a href="#cb14-4" aria-hidden="true"></a><span class="co"># 问题: 当 N 很大时，2 次 matmul 的额外计算开销能接受吗?</span></span>
+<span id="cb14-5"><a href="#cb14-5" aria-hidden="true"></a><span class="co"># 答案: 能! 因为省下的显存可以处理更长的序列，</span></span>
+<span id="cb14-6"><a href="#cb14-6" aria-hidden="true"></a><span class="co">#       而计算时间是线性的，显存是二次的。</span></span></code></pre></div>
+<h3 id="练习-3思考-backward-的-grid-配置">练习 3：思考 Backward 的 Grid 配置</h3>
+<div class="sourceCode" id="cb15"><pre class="sourceCode python"><code class="sourceCode python"><span id="cb15-1"><a href="#cb15-1" aria-hidden="true"></a><span class="co"># Forward: grid = (cdiv(Nq, Q_BLOCK), B)</span></span>
+<span id="cb15-2"><a href="#cb15-2" aria-hidden="true"></a><span class="co"># Backward: grid = ?</span></span>
+<span id="cb15-3"><a href="#cb15-3" aria-hidden="true"></a></span>
+<span id="cb15-4"><a href="#cb15-4" aria-hidden="true"></a><span class="co"># 答案: 同样是 (cdiv(Nq, Q_BLOCK), B)</span></span>
+<span id="cb15-5"><a href="#cb15-5" aria-hidden="true"></a><span class="co"># 原因: 每个 block 处理相同的 Q block，循环结构相同</span></span></code></pre></div>
+<hr />
+<p><strong>运行本章代码：</strong> <code>python 06_backward.py</code> <strong>下一章：</strong> 第七章 — 速查表与资源</p>
