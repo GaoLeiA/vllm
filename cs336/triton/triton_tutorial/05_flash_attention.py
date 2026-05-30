@@ -279,6 +279,10 @@ class FlashAttentionTriton(torch.autograd.Function):
 
         grid = (triton.cdiv(Nq, Q_BLOCK), B)
 
+        print(f"\n[FlashAttentionTriton.forward] 准备启动 Kernel:")
+        print(f"  -> B={B}, Nq={Nq}, Nk={Nk}, D={D}, is_causal={is_causal}")
+        print(f"  -> grid={grid}, Q_BLOCK={Q_BLOCK}, K_BLOCK={K_BLOCK}")
+
         _flash_attn_fwd_kernel[grid](
             Q, K, V, O, L,
             Q.stride(0), Q.stride(1), Q.stride(2),
@@ -292,6 +296,7 @@ class FlashAttentionTriton(torch.autograd.Function):
             Q_BLOCK=Q_BLOCK,
             K_BLOCK=K_BLOCK,
         )
+        print(f"[FlashAttentionTriton.forward] Kernel 执行完毕.")
 
         ctx.save_for_backward(Q, K, V, L)
         ctx.is_causal = is_causal
@@ -324,6 +329,7 @@ def test_flash_attention():
     print("=== FlashAttention Forward 正确性验证 ===\n")
 
     for B, N, D in configs:
+        print(f"\n[test_flash_attention] 测试配置: B={B}, N={N}, D={D}")
         Q = torch.randn(B, N, D, device="cuda", dtype=torch.float16)
         K = torch.randn(B, N, D, device="cuda", dtype=torch.float16)
         V = torch.randn(B, N, D, device="cuda", dtype=torch.float16)
@@ -348,6 +354,7 @@ def test_flash_attention_causal():
     torch.manual_seed(123)
 
     B, N, D = 2, 128, 64
+    print(f"\n[test_flash_attention_causal] 测试配置: B={B}, N={N}, D={D}")
     Q = torch.randn(B, N, D, device="cuda", dtype=torch.float16)
     K = torch.randn(B, N, D, device="cuda", dtype=torch.float16)
     V = torch.randn(B, N, D, device="cuda", dtype=torch.float16)

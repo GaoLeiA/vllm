@@ -112,6 +112,11 @@ def matmul_simple_wrapper(A: torch.Tensor, B: torch.Tensor) -> torch.Tensor:
     num_m_blocks = triton.cdiv(M, BLOCK_SIZE_M)
     num_n_blocks = triton.cdiv(N, BLOCK_SIZE_N)
 
+    print(f"\n[matmul_simple_wrapper] 准备启动 Kernel:")
+    print(f"  -> M={M}, N={N}, K={K}")
+    print(f"  -> Grid: ({num_m_blocks}, {num_n_blocks})")
+    print(f"  -> BLOCK_SIZE: M={BLOCK_SIZE_M}, N={BLOCK_SIZE_N}, K={BLOCK_SIZE_K}")
+
     matmul_simple_kernel[(num_m_blocks, num_n_blocks)](
         A, B, C,
         M, N, K,
@@ -120,6 +125,7 @@ def matmul_simple_wrapper(A: torch.Tensor, B: torch.Tensor) -> torch.Tensor:
         C.stride(0), C.stride(1),
         BLOCK_SIZE_M, BLOCK_SIZE_N, BLOCK_SIZE_K,
     )
+    print(f"[matmul_simple_wrapper] Kernel 执行完毕.")
     return C
 
 

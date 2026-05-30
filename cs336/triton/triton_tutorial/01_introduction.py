@@ -110,10 +110,16 @@ def hello_wrapper(x: torch.Tensor) -> torch.Tensor:
     num_blocks = triton.cdiv(n, block_size)  # triton.cdiv = ceil(n / block_size)
     # 例如 n=5000, block_size=1024 → num_blocks=5
 
+    print(f"\n[hello_wrapper] 准备启动 Kernel:")
+    print(f"  -> 总元素数 (n): {n}")
+    print(f"  -> 每个 Block 处理的元素数 (block_size): {block_size}")
+    print(f"  -> 分配的 Block 数量 (num_blocks): {num_blocks}")
+
     # ---- 启动 Kernel ----
     # 语法: kernel_name[(grid_config)](参数列表)
     # grid_config 是一个 tuple，对应 kernel 中 program_id 的 axis
     hello_kernel[(num_blocks,)](x, y, n, BLOCK_SIZE=block_size)
+    print(f"[hello_wrapper] Kernel 执行完毕.\n")
 
     return y
 
@@ -130,7 +136,7 @@ if torch.cuda.is_available():
     print(f"正确:  {torch.allclose(y.cpu(), x.cpu() + 1)}")
 
     # 测试大张量 + 非对齐边界
-    x_big = torch.randn(5000, device="cuda")
+    x_big = torch.randn(1000000, device="cuda")
     y_big = hello_wrapper(x_big)
     assert torch.allclose(y_big.cpu(), x_big.cpu() + 1)
     print("大张量测试通过!")

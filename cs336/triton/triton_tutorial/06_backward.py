@@ -54,6 +54,8 @@ def flash_attention_backward_pytorch(q, k, v, o, l, m, do, causal=False, block_s
     B, N, D = q.shape
     scale = 1.0 / (D ** 0.5)
 
+    print(f"\n[flash_attention_backward_pytorch] 开始 PyTorch 反向传播计算: B={B}, N={N}, D={D}, block_size={block_size}")
+
     # 初始化梯度
     dq = torch.zeros_like(q)
     dk = torch.zeros_like(k)
@@ -113,6 +115,8 @@ def test_backward_pytorch():
     """对比 PyTorch 标准 attention 的梯度和我们的实现"""
     torch.manual_seed(42)
     B, N, D = 4, 128, 64
+
+    print(f"\n[test_backward_pytorch] 准备测试反向传播: B={B}, N={N}, D={D}")
 
     q = torch.randn(B, N, D, device="cuda", requires_grad=True)
     k = torch.randn(B, N, D, device="cuda", requires_grad=True)

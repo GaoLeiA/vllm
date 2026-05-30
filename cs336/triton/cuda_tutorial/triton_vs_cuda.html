@@ -1,0 +1,502 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Triton vs CUDA: 算子实现细节深度解析</title>
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;600;700&family=Fira+Code:wght@400;500&display=swap" rel="stylesheet">
+    <style>
+        :root {
+            --bg-color: #0b0f19;
+            --surface: #1a2235;
+            --surface-light: #252f48;
+            --text-primary: #e2e8f0;
+            --text-secondary: #94a3b8;
+            --accent-primary: #3b82f6;
+            --accent-gradient: linear-gradient(135deg, #3b82f6 0%, #8b5cf6 100%);
+            --triton-color: #10b981;
+            --cuda-color: #f59e0b;
+        }
+
+        body {
+            font-family: 'Inter', sans-serif;
+            background-color: var(--bg-color);
+            color: var(--text-primary);
+            line-height: 1.6;
+            margin: 0;
+            padding: 0;
+            overflow-x: hidden;
+        }
+
+        .container {
+            max-width: 1400px;
+            margin: 0 auto;
+            padding: 40px 20px;
+        }
+
+        header {
+            text-align: center;
+            margin-bottom: 60px;
+            animation: fadeInDown 0.8s ease-out;
+        }
+
+        h1 {
+            font-size: 3rem;
+            font-weight: 700;
+            margin-bottom: 10px;
+            background: var(--accent-gradient);
+            -webkit-background-clip: text;
+            -webkit-text-fill-color: transparent;
+        }
+
+        h2 {
+            font-size: 2rem;
+            margin-top: 50px;
+            margin-bottom: 20px;
+            padding-bottom: 10px;
+            border-bottom: 1px solid var(--surface-light);
+        }
+
+        .subtitle {
+            color: var(--text-secondary);
+            font-size: 1.2rem;
+            max-width: 600px;
+            margin: 0 auto;
+        }
+
+        .chapter {
+            background-color: var(--surface);
+            border-radius: 16px;
+            padding: 30px;
+            margin-bottom: 40px;
+            box-shadow: 0 10px 30px rgba(0,0,0,0.2);
+            transition: transform 0.3s ease, box-shadow 0.3s ease;
+            border: 1px solid rgba(255,255,255,0.05);
+        }
+
+        .chapter:hover {
+            transform: translateY(-5px);
+            box-shadow: 0 15px 40px rgba(0,0,0,0.4);
+            border-color: rgba(255,255,255,0.1);
+        }
+
+        .comparison-grid {
+            display: grid;
+            grid-template-columns: 1fr 1fr;
+            gap: 20px;
+            margin-top: 20px;
+        }
+
+        @media (max-width: 900px) {
+            .comparison-grid {
+                grid-template-columns: 1fr;
+            }
+        }
+
+        .code-panel {
+            background-color: #0d1117;
+            border-radius: 12px;
+            overflow: hidden;
+            display: flex;
+            flex-direction: column;
+        }
+
+        .code-header {
+            padding: 12px 20px;
+            font-weight: 600;
+            display: flex;
+            align-items: center;
+            font-size: 0.9rem;
+        }
+
+        .code-header.triton {
+            background: linear-gradient(90deg, rgba(16,185,129,0.15) 0%, transparent 100%);
+            border-bottom: 1px solid rgba(16,185,129,0.2);
+            color: var(--triton-color);
+        }
+
+        .code-header.cuda {
+            background: linear-gradient(90deg, rgba(245,158,11,0.15) 0%, transparent 100%);
+            border-bottom: 1px solid rgba(245,158,11,0.2);
+            color: var(--cuda-color);
+        }
+
+        pre {
+            margin: 0;
+            padding: 20px;
+            overflow-x: auto;
+            font-family: 'Fira Code', monospace;
+            font-size: 0.9rem;
+            color: #c9d1d9;
+            flex-grow: 1;
+        }
+
+        /* 简单的语法高亮 */
+        .kw { color: #ff7b72; }
+        .fn { color: #d2a8ff; }
+        .cm { color: #8b949e; font-style: italic; }
+        .str { color: #a5d6ff; }
+        .num { color: #79c0ff; }
+        .typ { color: #ff7b72; }
+
+        .explanation {
+            margin-top: 25px;
+            padding: 20px;
+            background-color: rgba(59, 130, 246, 0.05);
+            border-left: 4px solid var(--accent-primary);
+            border-radius: 0 8px 8px 0;
+        }
+
+        .explanation ul {
+            padding-left: 20px;
+            margin-bottom: 0;
+        }
+
+        .explanation li {
+            margin-bottom: 10px;
+        }
+
+        .highlight {
+            background: rgba(255,255,255,0.1);
+            padding: 2px 6px;
+            border-radius: 4px;
+            font-family: 'Fira Code', monospace;
+            font-size: 0.85em;
+            color: #fff;
+        }
+
+        @keyframes fadeInDown {
+            from { opacity: 0; transform: translateY(-20px); }
+            to { opacity: 1; transform: translateY(0); }
+        }
+
+        /* 顶部导航和固定特效 */
+        .glass-nav {
+            position: sticky;
+            top: 0;
+            z-index: 100;
+            background: rgba(11, 15, 25, 0.8);
+            backdrop-filter: blur(10px);
+            border-bottom: 1px solid rgba(255,255,255,0.05);
+            padding: 15px 0;
+            margin-bottom: 40px;
+        }
+
+        .nav-content {
+            max-width: 1400px;
+            margin: 0 auto;
+            padding: 0 20px;
+            display: flex;
+            gap: 20px;
+            overflow-x: auto;
+        }
+
+        .nav-content a {
+            color: var(--text-secondary);
+            text-decoration: none;
+            font-weight: 600;
+            font-size: 0.9rem;
+            padding: 8px 16px;
+            border-radius: 20px;
+            transition: all 0.2s;
+            white-space: nowrap;
+        }
+
+        .nav-content a:hover {
+            color: #fff;
+            background: rgba(255,255,255,0.1);
+        }
+    </style>
+</head>
+<body>
+
+    <nav class="glass-nav">
+        <div class="nav-content">
+            <a href="#ch1">1. 基础概念 (Hello)</a>
+            <a href="#ch2">2. 元素级操作</a>
+            <a href="#ch3">3. 行级聚合 (Softmax)</a>
+            <a href="#ch4">4. 矩阵乘法</a>
+            <a href="#ch5">5. FlashAttention</a>
+        </div>
+    </nav>
+
+    <div class="container">
+        <header>
+            <h1>Triton vs CUDA 深度解析</h1>
+            <p class="subtitle">从底层视角理解 Triton 是如何抽象并简化 GPU 编程的</p>
+        </header>
+
+        <!-- 第 1 章 -->
+        <section id="ch1" class="chapter">
+            <h2>第一章: 编程模型差异 (Hello Kernel)</h2>
+            <p>Triton 和 CUDA 最大的区别在于<strong>并发抽象的层级</strong>。CUDA 要求开发者管理 Grid、Block 和单个 Thread，而 Triton 要求开发者只需要管理到 Block 层级（SIMD/SIMT 级别的向量化），编译器会自动将 Block 内的计算分配给具体的 Thread。</p>
+            
+            <div class="comparison-grid">
+                <div class="code-panel">
+                    <div class="code-header triton">
+                        <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="margin-right:8px;"><polyline points="4 14 10 14 10 20"></polyline><polyline points="20 10 14 10 14 4"></polyline><line x1="14" y1="10" x2="21" y2="3"></line><line x1="3" y1="21" x2="10" y2="14"></line></svg>
+                        Triton (Python)
+                    </div>
+                    <pre><code><span class="kw">@triton.jit</span>
+<span class="kw">def</span> <span class="fn">hello_kernel</span>(x_ptr, y_ptr, n_elements, BLOCK_SIZE: <span class="kw">tl.constexpr</span>):
+    <span class="cm"># 1. 获取当前 Block 的 ID</span>
+    pid = <span class="fn">tl.program_id</span>(axis=<span class="num">0</span>)
+    
+    <span class="cm"># 2. 生成一个 Block 内所有元素的偏移量数组</span>
+    block_start = pid * BLOCK_SIZE
+    offsets = block_start + <span class="fn">tl.arange</span>(<span class="num">0</span>, BLOCK_SIZE)
+    
+    <span class="cm"># 3. 边界遮罩 (Mask)</span>
+    mask = offsets &lt; n_elements
+    
+    <span class="cm"># 4. 向量化加载与计算</span>
+    x = <span class="fn">tl.load</span>(x_ptr + offsets, mask=mask)
+    <span class="fn">tl.store</span>(y_ptr + offsets, x + <span class="num">1</span>, mask=mask)</code></pre>
+                </div>
+                
+                <div class="code-panel">
+                    <div class="code-header cuda">
+                        <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="margin-right:8px;"><polygon points="12 2 2 7 12 12 22 7 12 2"></polygon><polyline points="2 17 12 22 22 17"></polyline><polyline points="2 12 12 17 22 12"></polyline></svg>
+                        CUDA C++
+                    </div>
+                    <pre><code><span class="kw">__global__ void</span> <span class="fn">hello_kernel</span>(
+    <span class="kw">const float</span>* x, <span class="kw">float</span>* y, <span class="kw">int</span> n_elements) {
+    
+    <span class="cm">// 1. 计算当前 *单个 Thread* 的全局索引</span>
+    <span class="cm">// blockIdx.x 对应 tl.program_id(0)</span>
+    <span class="cm">// threadIdx.x 对应 tl.arange(...) 中的某个特定值</span>
+    <span class="kw">int</span> idx = blockIdx.x * blockDim.x + threadIdx.x;
+    
+    
+    <span class="cm">// 2. 标量级别的边界检查</span>
+    <span class="kw">if</span> (idx &lt; n_elements) {
+        
+        <span class="cm">// 3. 标量计算，所有线程并发执行这行代码</span>
+        y[idx] = x[idx] + <span class="num">1.0f</span>;
+    }
+}</code></pre>
+                </div>
+            </div>
+            
+            <div class="explanation">
+                <strong>💡 细节解析：</strong>
+                <ul>
+                    <li><span class="highlight">tl.program_id(0)</span> 完全等价于 CUDA 中的 <span class="highlight">blockIdx.x</span>。它们都代表当前执行的线程块编号。</li>
+                    <li>Triton 的核心魔法在于 <span class="highlight">tl.arange</span>。在 Triton 中，你写出的代码处理的是<strong>向量</strong>（一个 Block 内的所有元素）。Triton 编译器在编译时，会自动将这些向量操作映射为 CUDA 中对应的 <span class="highlight">threadIdx.x</span> 标量操作。</li>
+                    <li>Triton 使用 <span class="highlight">mask</span> 来处理数组越界，这对应底层指令的 Predicate；而在 CUDA 中，我们直观地使用 <span class="highlight">if (idx < n)</span> 分支。</li>
+                </ul>
+            </div>
+        </section>
+
+        <!-- 第 2 章 -->
+        <section id="ch2" class="chapter">
+            <h2>第二章: 元素级操作 (Elementwise)</h2>
+            <p>元素级操作中，线程间不存在依赖，因此两种语言的表达非常类似。Triton 直接利用其内建的数学库，CUDA 则使用设备内建的 C 数学库（如 <code>fmaxf</code>, <code>expf</code>, <code>tanhf</code>）。</p>
+            
+            <div class="comparison-grid">
+                <div class="code-panel">
+                    <div class="code-header triton">Triton (GeLU)</div>
+                    <pre><code><span class="cm"># GeLU 激活函数实现</span>
+a = <span class="num">0.79788456</span> * (x + <span class="num">0.044715</span> * x * x * x)
+exp_2a = <span class="fn">tl.exp</span>(<span class="num">2</span> * a)
+<span class="cm"># Triton 没有直接的 tanh，通过 exp 自己拼装</span>
+tanh_a = (exp_2a - <span class="num">1.0</span>) / (exp_2a + <span class="num">1.0</span>)
+y = <span class="num">0.5</span> * x * (<span class="num">1.0</span> + tanh_a)</code></pre>
+                </div>
+                
+                <div class="code-panel">
+                    <div class="code-header cuda">CUDA C++ (GeLU)</div>
+                    <pre><code><span class="cm">// CUDA 内置了极快的原生 tanhf 函数</span>
+<span class="kw">float</span> val = x[idx];
+<span class="kw">float</span> a = <span class="num">0.79788456f</span> * (val + <span class="num">0.044715f</span> * val * val * val);
+
+<span class="kw">float</span> tanh_a = <span class="fn">tanhf</span>(a); <span class="cm">// 硬件加速</span>
+y[idx] = <span class="num">0.5f</span> * val * (<span class="num">1.0f</span> + tanh_a);</code></pre>
+                </div>
+            </div>
+            
+            <div class="explanation">
+                <strong>💡 细节解析：</strong>
+                <ul>
+                    <li>Triton 的内建函数库 (如 <span class="highlight">tl.exp</span>) 最终也会被 PTX 编译器映射为相同的硬件指令。</li>
+                    <li>在 CUDA 中，我们常使用带有 <code>f</code> 后缀的函数（如 <code>expf</code>，<code>tanhf</code>）来确保执行的是单精度（FP32）计算。如果在 CUDA 中写 <code>exp()</code>，可能会被提升为双精度（FP64），导致性能剧烈下降，Triton 帮用户规避了这种数据类型陷阱。</li>
+                </ul>
+            </div>
+        </section>
+
+        <!-- 第 3 章 -->
+        <section id="ch3" class="chapter">
+            <h2>第三章: 行级聚合 (Softmax)</h2>
+            <p><strong>这里是 Triton 展现真正威力的地方！</strong> 行级聚合（如找最大值、求和）需要在线程间通信。在 GPU 中，同一 Block 内的线程通过<strong>共享内存 (Shared Memory)</strong> 进行通信。Triton 完全隐藏了共享内存的分配和树形归约 (Tree Reduction) 的复杂逻辑。</p>
+            
+            <div class="comparison-grid">
+                <div class="code-panel">
+                    <div class="code-header triton">Triton (Softmax 最大值与求和)</div>
+                    <pre><code><span class="cm"># 加载一整行 (向量化)</span>
+row = <span class="fn">tl.load</span>(x_ptr + offsets, mask=mask)
+
+<span class="cm"># 1. 找最大值：只需 1 行代码！</span>
+row_max = <span class="fn">tl.max</span>(row, axis=<span class="num">0</span>)
+
+<span class="cm"># 2. 减去最大值并求 exp</span>
+numerator = <span class="fn">tl.exp</span>(row - row_max)
+
+<span class="cm"># 3. 求和：只需 1 行代码！</span>
+denominator = <span class="fn">tl.sum</span>(numerator, axis=<span class="num">0</span>)</code></pre>
+                </div>
+                
+                <div class="code-panel">
+                    <div class="code-header cuda">CUDA C++ (Softmax 找最大值)</div>
+                    <pre><code><span class="kw">extern __shared__ float</span> sdata[]; <span class="cm">// 手动声明共享内存</span>
+
+<span class="cm">// --- 第一步：每个线程找自己负责元素的局部最大值 ---</span>
+<span class="kw">float</span> local_max = -INFINITY;
+<span class="kw">for</span> (<span class="kw">int</span> col = threadIdx.x; col &lt; N; col += blockDim.x) {
+    local_max = <span class="fn">fmaxf</span>(local_max, x_row[col]);
+}
+sdata[threadIdx.x] = local_max;
+<span class="fn">__syncthreads()</span>; <span class="cm">// 等待所有线程写入完毕</span>
+
+<span class="cm">// --- 第二步：树形归约 (Tree Reduction) ---</span>
+<span class="cm">// 对应 Triton 编译器在后台自动生成的操作</span>
+<span class="kw">for</span> (<span class="kw">int</span> s = blockDim.x / <span class="num">2</span>; s &gt; <span class="num">0</span>; s &gt;&gt;= <span class="num">1</span>) {
+    <span class="kw">if</span> (threadIdx.x &lt; s) {
+        sdata[threadIdx.x] = <span class="fn">fmaxf</span>(
+            sdata[threadIdx.x], 
+            sdata[threadIdx.x + s]
+        );
+    }
+    <span class="fn">__syncthreads()</span>; <span class="cm">// 每次规约都必须同步！</span>
+}
+<span class="kw">float</span> row_max = sdata[<span class="num">0</span>]; <span class="cm">// 最终结果存放在 0 号位置</span></code></pre>
+                </div>
+            </div>
+            
+            <div class="explanation">
+                <strong>💡 细节解析：</strong>
+                <ul>
+                    <li>Triton 中的 <span class="highlight">tl.max(axis=0)</span> 在 CUDA 中需要近 15 行代码来实现！</li>
+                    <li><strong>Shared Memory (__shared__)：</strong> 在 CUDA 中，必须手动开辟一块靠近计算单元的 L1 级别缓存来交换数据。Triton 编译器会根据 <code>tl.max</code> 等需要规约的函数，自动分析并在后台分配合适的共享内存。</li>
+                    <li><strong>Barrier 同步 (__syncthreads)：</strong> GPU 线程是高度并行的，读写共享内存时极易发生数据竞争（Race Condition）。在 CUDA 中必须极为严谨地插入同步点；Triton 编译器（基于 MLIR）会自动在需要的地方安插同步指令。</li>
+                </ul>
+            </div>
+        </section>
+
+        <!-- 第 4 章 -->
+        <section id="ch4" class="chapter">
+            <h2>第四章: 矩阵乘法 (Tiled MatMul)</h2>
+            <p>为了达到极致性能，矩阵乘法必须使用 <strong>Tiling (分块)</strong> 技术，将数据分块加载到共享内存中复用。Triton 原生以 Block (Tile) 为一等公民，极大地简化了这一设计模式。</p>
+            
+            <div class="comparison-grid">
+                <div class="code-panel">
+                    <div class="code-header triton">Triton (Tiled MatMul 内循环)</div>
+                    <pre><code><span class="cm"># acc 初始化</span>
+acc = <span class="fn">tl.zeros</span>((BLOCK_SIZE_M, BLOCK_SIZE_N), dtype=tl.float32)
+
+<span class="kw">for</span> k <span class="kw">in range</span>(<span class="num">0</span>, tl.cdiv(K, BLOCK_SIZE_K)):
+    <span class="cm"># 1. 加载 A 和 B 的 Block</span>
+    a = <span class="fn">tl.load</span>(a_ptrs, mask=a_mask, other=<span class="num">0.0</span>)
+    b = <span class="fn">tl.load</span>(b_ptrs, mask=b_mask, other=<span class="num">0.0</span>)
+    
+    <span class="cm"># 2. 执行矩阵乘法 (自动使用 Tensor Cores 和 SRAM)</span>
+    acc += <span class="fn">tl.dot</span>(a, b)
+    
+    <span class="cm"># 3. 指针步进</span>
+    a_ptrs += BLOCK_SIZE_K * stride_ak
+    b_ptrs += BLOCK_SIZE_K * stride_bk</code></pre>
+                </div>
+                
+                <div class="code-panel">
+                    <div class="code-header cuda">CUDA C++ (Tiled MatMul 内循环)</div>
+                    <pre><code><span class="cm">// CUDA: 手动声明 A 和 B 的 Shared Memory Tiles</span>
+<span class="kw">__shared__ float</span> As[TILE_SIZE][TILE_SIZE];
+<span class="kw">__shared__ float</span> Bs[TILE_SIZE][TILE_SIZE];
+
+<span class="kw">for</span> (<span class="kw">int</span> t = <span class="num">0</span>; t &lt; num_tiles; t++) {
+    <span class="cm">// 1. 每个线程合作加载元素到 Shared Memory</span>
+    As[threadIdx.y][threadIdx.x] = A[row * K + a_col];
+    Bs[threadIdx.y][threadIdx.x] = B[b_row * N + col];
+    
+    <span class="fn">__syncthreads()</span>; <span class="cm">// 等待整个 Tile 加载完成</span>
+
+    <span class="cm">// 2. 在 Shared Memory 内完成点积运算</span>
+    <span class="kw">#pragma unroll</span>
+    <span class="kw">for</span> (<span class="kw">int</span> k = <span class="num">0</span>; k &lt; TILE_SIZE; k++) {
+        sum += As[threadIdx.y][k] * Bs[k][threadIdx.x];
+    }
+    
+    <span class="fn">__syncthreads()</span>; <span class="cm">// 等待计算完成才能加载下一个 Tile</span>
+}</code></pre>
+                </div>
+            </div>
+            
+            <div class="explanation">
+                <strong>💡 细节解析：</strong>
+                <ul>
+                    <li>Triton 中的 <span class="highlight">tl.dot(a, b)</span> 是一个极其重量级的操作符！它在编译器后端会自动完成：(1) 将 a 和 b 发送到共享内存；(2) 调整内存排布（Swizzling）以避免 Shared Memory Bank Conflict；(3) 调用 NVIDIA Tensor Cores（如果维度满足要求且为 FP16/BF16）。</li>
+                    <li>在 CUDA 原生实现中，如果要用 Tensor Cores 需要调用非常底层的 <code>mma.sync</code> PTX 指令或使用复杂的 <code>wmma</code> API，门槛极高。我们在上述 CUDA 教程中使用的是普通的 FP32 CUDA Core 计算。</li>
+                </ul>
+            </div>
+        </section>
+
+        <!-- 第 5 章 -->
+        <section id="ch5" class="chapter">
+            <h2>第五章: FlashAttention (复杂融合)</h2>
+            <p>FlashAttention 结合了 <strong>Online Softmax</strong> 和 <strong>Tiled Matmul</strong>。因为需要在同一个内循环中同时做求最大值、动态缩放、和矩阵乘法，它的 CUDA 原生实现极度复杂，需要仔细编排共享内存复用。而 Triton 则能保持数学表达的清晰度。</p>
+            
+            <div class="comparison-grid">
+                <div class="code-panel">
+                    <div class="code-header triton">Triton (Online Softmax 更新)</div>
+                    <pre><code><span class="cm"># S_ij = Q @ K^T</span>
+qk = <span class="fn">tl.dot</span>(q, k) * sm_scale
+
+<span class="cm"># 结合上一个 Block 的 max</span>
+m_i_new = <span class="fn">tl.maximum</span>(m_i, <span class="fn">tl.max</span>(qk, axis=<span class="num">1</span>))
+alpha = <span class="fn">tl.exp</span>(m_i - m_i_new)
+
+<span class="cm"># P = exp(S_ij - max)</span>
+p = <span class="fn">tl.exp</span>(qk - m_i_new[:, <span class="kw">None</span>])
+
+<span class="cm"># 修正旧的累加并加入新值</span>
+l_i_new = alpha * l_i + <span class="fn">tl.sum</span>(p, axis=<span class="num">1</span>)
+acc = alpha[:, <span class="kw">None</span>] * acc + <span class="fn">tl.dot</span>(p, v)</code></pre>
+                </div>
+                
+                <div class="code-panel">
+                    <div class="code-header cuda">CUDA C++ (Online Softmax 更新片段)</div>
+                    <pre><code><span class="cm">// CUDA: Q@K^T 需手动 Reduction 求出 S_ij，存在 shared memory</span>
+<span class="kw">float</span> m_new = <span class="fn">fmaxf</span>(m_acc, m_block); <span class="cm">// 当前 max</span>
+<span class="kw">float</span> alpha = <span class="fn">expf</span>(m_acc - m_new);
+
+<span class="cm">// 修正旧值</span>
+o_acc *= alpha;
+l_acc *= alpha;
+
+<span class="cm">// P @ V 内循环展开 (每个线程处理特征维度 d)</span>
+<span class="kw">for</span> (<span class="kw">int</span> j = <span class="num">0</span>; j &lt; k_len; j++) {
+    <span class="kw">float</span> p_j = <span class="fn">expf</span>(s_scores[j] - m_new);
+    <span class="kw">const float</span>* v_row = v_base + (k_start + j) * D;
+    
+    <span class="kw">if</span> (d &lt; D) {
+        o_acc += p_j * v_row[d];
+    }
+    l_acc += p_j;
+}</code></pre>
+                </div>
+            </div>
+            
+            <div class="explanation">
+                <strong>💡 细节解析：</strong>
+                <ul>
+                    <li>在 FlashAttention 中，Triton 仍然能够维持矩阵级别（<code>tl.dot</code>）和向量级别（<code>tl.max</code>）的抽象，让算法工程师能直接将数学公式翻译为代码。</li>
+                    <li>在 CUDA 中，开发者必须非常小心：不仅要为 Q、K、V 的块分配共享内存，还要为 reduction 中间结果（如 <code>s_scores</code>）规划内存。这就导致 FlashAttention 的底层 C++ 实现动辄上千行，而 Triton 版本仅需百余行。</li>
+                </ul>
+            </div>
+        </section>
+        
+        <footer style="text-align: center; margin-top: 60px; color: var(--text-secondary); border-top: 1px solid var(--surface-light); padding-top: 20px;">
+            <p>Generated based on your custom CUDA vs Triton implementation project in <code>/home/gaolei/vllm/cs336/triton/cuda_tutorial/</code>.</p>
+        </footer>
+    </div>
+</body>
+</html>

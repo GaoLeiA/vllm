@@ -44,7 +44,9 @@ def relu_wrapper(x: torch.Tensor) -> torch.Tensor:
     block_size = 1024
     num_blocks = triton.cdiv(n, block_size)
     y = torch.empty_like(x)
+    print(f"\n[relu_wrapper] 准备启动 Kernel: n={n}, block_size={block_size}, num_blocks={num_blocks}")
     relu_kernel[(num_blocks,)](x, y, n, BLOCK_SIZE=block_size)
+    print(f"[relu_wrapper] Kernel 执行完毕.")
     return y
 
 
@@ -87,7 +89,9 @@ def silu_wrapper(x: torch.Tensor) -> torch.Tensor:
     block_size = 1024
     num_blocks = triton.cdiv(n, block_size)
     y = torch.empty_like(x)
+    print(f"\n[silu_wrapper] 准备启动 Kernel: n={n}, block_size={block_size}, num_blocks={num_blocks}")
     silu_kernel[(num_blocks,)](x, y, n, BLOCK_SIZE=block_size)
+    print(f"[silu_wrapper] Kernel 执行完毕.")
     return y
 
 
@@ -137,7 +141,9 @@ def gelu_wrapper(x: torch.Tensor) -> torch.Tensor:
     block_size = 1024
     num_blocks = triton.cdiv(n, block_size)
     y = torch.empty_like(x)
+    print(f"\n[gelu_wrapper] 准备启动 Kernel: n={n}, block_size={block_size}, num_blocks={num_blocks}")
     gelu_kernel[(num_blocks,)](x, y, n, BLOCK_SIZE=block_size)
+    print(f"[gelu_wrapper] Kernel 执行完毕.")
     return y
 
 
@@ -227,7 +233,9 @@ def add_wrapper(x: torch.Tensor, y: torch.Tensor) -> torch.Tensor:
     block_size = 1024
     num_blocks = triton.cdiv(n, block_size)
     z = torch.empty_like(x)
+    print(f"\n[add_wrapper] 准备启动 Kernel: n={n}, block_size={block_size}, num_blocks={num_blocks}")
     add_kernel[(num_blocks,)](x, y, z, n, BLOCK_SIZE=block_size)
+    print(f"[add_wrapper] Kernel 执行完毕.")
     return z
 
 

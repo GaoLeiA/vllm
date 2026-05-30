@@ -91,11 +91,13 @@ def softmax_wrapper(x: torch.Tensor) -> torch.Tensor:
     block_size = triton.next_power_of_2(N)  # 取 2 的幂
     num_blocks = M  # 每行一个 block
 
+    print(f"\n[softmax_wrapper] 准备启动 Kernel: M={M}, N={N}, block_size={block_size}, num_blocks={num_blocks}")
     softmax_kernel[(M,)](
         x, y,
         x.stride(0), y.stride(0),  # row strides
         N, BLOCK_SIZE=block_size
     )
+    print(f"[softmax_wrapper] Kernel 执行完毕.")
     return y
 
 
@@ -158,11 +160,13 @@ def test_softmax_optimized():
     y1 = softmax_wrapper(x)
     block_size = triton.next_power_of_2(256)
     y2 = torch.empty_like(x)
+    print(f"\n[test_softmax_optimized] 准备启动 Kernel: block_size={block_size}")
     softmax_optimized_kernel[(100,)](
         x, y2,
         x.stride(0), y2.stride(0),
         256, BLOCK_SIZE=block_size
     )
+    print(f"[test_softmax_optimized] Kernel 执行完毕.")
     assert torch.allclose(y1, y2, atol=1e-5)
     print("✅ 优化版 Softmax 与朴素版等价")
 
@@ -206,10 +210,12 @@ def layernorm_wrapper(x: torch.Tensor, gamma: torch.Tensor, beta: torch.Tensor, 
     M, N = x.shape
     y = torch.empty_like(x)
     block_size = triton.next_power_of_2(N)
+    print(f"\n[layernorm_wrapper] 准备启动 Kernel: M={M}, N={N}, block_size={block_size}")
     layernorm_kernel[(M,)](
         x, y, gamma, beta,
         x.stride(0), N, eps, BLOCK_SIZE=block_size
     )
+    print(f"[layernorm_wrapper] Kernel 执行完毕.")
     return y
 
 
