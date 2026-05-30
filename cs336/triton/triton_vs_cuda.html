@@ -236,7 +236,7 @@
                     <div class="code-header triton">
                         <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="margin-right:8px;"><polyline points="4 14 10 14 10 20"></polyline><polyline points="20 10 14 10 14 4"></polyline><line x1="14" y1="10" x2="21" y2="3"></line><line x1="3" y1="21" x2="10" y2="14"></line></svg>
                         Triton (Python)
-                        <a href="file:///home/gaolei/vllm/cs336/triton/triton_tutorial/01_introduction_tutorial.html" target="_blank" style="margin-left: auto; color: inherit; text-decoration: underline; font-size: 0.85rem;">[阅读原教程]</a>
+                        <a href="triton_tutorial/01_introduction_tutorial.html" target="_blank" style="margin-left: auto; color: inherit; text-decoration: underline; font-size: 0.85rem;">[阅读原教程]</a>
                     </div>
                     <pre><code><span class="kw">@triton.jit</span>
 <span class="kw">def</span> <span class="fn">hello_kernel</span>(x_ptr, y_ptr, n_elements, BLOCK_SIZE: <span class="kw">tl.constexpr</span>):
@@ -298,7 +298,7 @@
                 <div class="code-panel">
                     <div class="code-header triton">
                         Triton (GeLU)
-                        <a href="file:///home/gaolei/vllm/cs336/triton/triton_tutorial/02_elementwise_tutorial.html" target="_blank" style="margin-left: auto; color: inherit; text-decoration: underline; font-size: 0.85rem;">[阅读原教程]</a>
+                        <a href="triton_tutorial/02_elementwise_tutorial.html" target="_blank" style="margin-left: auto; color: inherit; text-decoration: underline; font-size: 0.85rem;">[阅读原教程]</a>
                     </div>
                     <pre><code><span class="cm"># GeLU 激活函数实现</span>
 a = <span class="num">0.79788456</span> * (x + <span class="num">0.044715</span> * x * x * x)
@@ -337,7 +337,7 @@ y[idx] = <span class="num">0.5f</span> * val * (<span class="num">1.0f</span> + 
                 <div class="code-panel">
                     <div class="code-header triton">
                         Triton (Softmax 最大值与求和)
-                        <a href="file:///home/gaolei/vllm/cs336/triton/triton_tutorial/03_softmax_tutorial.html" target="_blank" style="margin-left: auto; color: inherit; text-decoration: underline; font-size: 0.85rem;">[阅读原教程]</a>
+                        <a href="triton_tutorial/03_softmax_tutorial.html" target="_blank" style="margin-left: auto; color: inherit; text-decoration: underline; font-size: 0.85rem;">[阅读原教程]</a>
                     </div>
                     <pre><code><span class="cm"># 加载一整行 (向量化)</span>
 row = <span class="fn">tl.load</span>(x_ptr + offsets, mask=mask)
@@ -398,7 +398,7 @@ sdata[threadIdx.x] = local_max;
                 <div class="code-panel">
                     <div class="code-header triton">
                         Triton (Tiled MatMul 内循环)
-                        <a href="file:///home/gaolei/vllm/cs336/triton/triton_tutorial/04_matmul_tutorial.html" target="_blank" style="margin-left: auto; color: inherit; text-decoration: underline; font-size: 0.85rem;">[阅读原教程]</a>
+                        <a href="triton_tutorial/04_matmul_tutorial.html" target="_blank" style="margin-left: auto; color: inherit; text-decoration: underline; font-size: 0.85rem;">[阅读原教程]</a>
                     </div>
                     <pre><code><span class="cm"># acc 初始化</span>
 acc = <span class="fn">tl.zeros</span>((BLOCK_SIZE_M, BLOCK_SIZE_N), dtype=tl.float32)
@@ -458,7 +458,7 @@ acc = <span class="fn">tl.zeros</span>((BLOCK_SIZE_M, BLOCK_SIZE_N), dtype=tl.fl
                 <div class="code-panel">
                     <div class="code-header triton">
                         Triton (Online Softmax 更新)
-                        <a href="file:///home/gaolei/vllm/cs336/triton/triton_tutorial/05_flash_attention_tutorial.html" target="_blank" style="margin-left: auto; color: inherit; text-decoration: underline; font-size: 0.85rem;">[阅读原教程]</a>
+                        <a href="triton_tutorial/05_flash_attention_tutorial.html" target="_blank" style="margin-left: auto; color: inherit; text-decoration: underline; font-size: 0.85rem;">[阅读原教程]</a>
                     </div>
                     <pre><code><span class="cm"># S_ij = Q @ K^T</span>
 qk = <span class="fn">tl.dot</span>(q, k) * sm_scale
