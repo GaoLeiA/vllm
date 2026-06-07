@@ -89,7 +89,7 @@ def matmul_simple_kernel(
         acc += tl.dot(a, b)
 
     # 转回 float16 (如果输入是 fp16)
-    acc = acc.to(C.element_type)
+    acc = acc.to(C.dtype.element_ty)
 
     # 写回
     c_ptrs = C + offset_m[:, None] * stride_cm + offset_n[None, :] * stride_cn
@@ -180,10 +180,79 @@ def test_matmul_sizes():
 
 
 # ============================================================
+# 练习 2.5: 高级版 —— Tiled + Shared Memory MatMul
+# ============================================================
+@triton.jit
+def matmul_advanced_kernel(
+    a_ptr, b_ptr, c_ptr,
+    M, N, K,
+    stride_am, stride_ak,
+    stride_bk, stride_bn,
+    stride_cm, stride_cn,
+    BLOCK_SIZE_M: tl.constexpr, BLOCK_SIZE_N: tl.constexpr, BLOCK_SIZE_K: tl.constexpr,
+    GROUP_SIZE_M: tl.constexpr,
+):
+    pid = tl.program_id(axis=0)
+    num_pid_m = tl.cdiv(M, BLOCK_SIZE_M)
+    num_pid_n = tl.cdiv(N, BLOCK_SIZE_N)
+    num_pid_in_group = GROUP_SIZE_M * num_pid_n
+    group_id = pid // num_pid_in_group
+    first_pid_m = group_id * GROUP_SIZE_M
+    group_size_m = min(num_pid_m - first_pid_m, GROUP_SIZE_M)
+    pid_m = first_pid_m + (pid % group_size_m)
+    pid_n = (pid % num_pid_in_group) // group_size_m
+
+    offs_am = (pid_m * BLOCK_SIZE_M + tl.arange(0, BLOCK_SIZE_M)) % M
+    offs_bn = (pid_n * BLOCK_SIZE_N + tl.arange(0, BLOCK_SIZE_N)) % N
+    offs_k = tl.arange(0, BLOCK_SIZE_K)
+    a_ptrs = a_ptr + (offs_am[:, None] * stride_am + offs_k[None, :] * stride_ak)
+    b_ptrs = b_ptr + (offs_k[:, None] * stride_bk + offs_bn[None, :] * stride_bn)
+
+    accumulator = tl.zeros((BLOCK_SIZE_M, BLOCK_SIZE_N), dtype=tl.float32)
+    for k in range(0, tl.cdiv(K, BLOCK_SIZE_K)):
+        a = tl.load(a_ptrs, mask=offs_k[None, :] < K - k * BLOCK_SIZE_K, other=0.0)
+        b = tl.load(b_ptrs, mask=offs_k[:, None] < K - k * BLOCK_SIZE_K, other=0.0)
+        accumulator += tl.dot(a, b)
+        a_ptrs += BLOCK_SIZE_K * stride_ak
+        b_ptrs += BLOCK_SIZE_K * stride_bk
+
+    c = accumulator.to(c_ptr.dtype.element_ty)
+
+    offs_cm = pid_m * BLOCK_SIZE_M + tl.arange(0, BLOCK_SIZE_M)
+    offs_cn = pid_n * BLOCK_SIZE_N + tl.arange(0, BLOCK_SIZE_N)
+    c_ptrs = c_ptr + stride_cm * offs_cm[:, None] + stride_cn * offs_cn[None, :]
+    c_mask = (offs_cm[:, None] < M) & (offs_cn[None, :] < N)
+    tl.store(c_ptrs, c, mask=c_mask)
+
+def matmul_advanced_wrapper(a: torch.Tensor, b: torch.Tensor) -> torch.Tensor:
+    M, K = a.shape
+    K2, N = b.shape
+    assert K == K2
+    c = torch.empty((M, N), device=a.device, dtype=a.dtype)
+    grid = lambda META: (
+        triton.cdiv(M, META['BLOCK_SIZE_M']) * triton.cdiv(N, META['BLOCK_SIZE_N']),
+    )
+    matmul_advanced_kernel[grid](
+        a, b, c,
+        M, N, K,
+        a.stride(0), a.stride(1),
+        b.stride(0), b.stride(1),
+        c.stride(0), c.stride(1),
+        BLOCK_SIZE_M=128,
+        BLOCK_SIZE_N=128,
+        BLOCK_SIZE_K=32,
+        GROUP_SIZE_M=8,
+        num_stages=4,
+        num_warps=4,
+    )
+    return c
+
+
+# ============================================================
 # 练习 3: 性能对比
 # ============================================================
 def benchmark_matmul():
-    """对比 Triton 简单版和 PyTorch 原生 matmul"""
+    """对比 Triton 简单版、高级版和 PyTorch 原生 matmul"""
     import time
 
     sizes = [(512, 512, 512), (1024, 1024, 1024), (2048, 2048, 2048)]
@@ -196,6 +265,7 @@ def benchmark_matmul():
         # 预热
         C1 = A @ B
         C2 = matmul_simple_wrapper(A, B)
+        C3 = matmul_advanced_wrapper(A, B)
         torch.cuda.synchronize()
 
         # PyTorch 计时
@@ -206,7 +276,7 @@ def benchmark_matmul():
             torch.cuda.synchronize()
             times_pytorch.append((time.time() - start) * 1000)
 
-        # Triton 计时
+        # Triton Simple 计时
         times_triton = []
         for _ in range(num_trials):
             start = time.time()
@@ -214,12 +284,21 @@ def benchmark_matmul():
             torch.cuda.synchronize()
             times_triton.append((time.time() - start) * 1000)
 
+        # Triton Advanced 计时
+        times_triton_adv = []
+        for _ in range(num_trials):
+            start = time.time()
+            C3 = matmul_advanced_wrapper(A, B)
+            torch.cuda.synchronize()
+            times_triton_adv.append((time.time() - start) * 1000)
+
         avg_pytorch = sum(times_pytorch) / len(times_pytorch)
         avg_triton = sum(times_triton) / len(times_triton)
+        avg_triton_adv = sum(times_triton_adv) / len(times_triton_adv)
 
         print(f"  ({M:4d}, {K:4d}, {N:4d}): "
-              f"PyTorch={avg_pytorch:7.2f}ms, Triton={avg_triton:7.2f}ms, "
-              f"ratio={avg_pytorch/avg_triton:.2f}x")
+              f"PyTorch={avg_pytorch:7.2f}ms, TritonSimple={avg_triton:7.2f}ms, TritonAdv={avg_triton_adv:7.2f}ms, "
+              f"ratio(PyT/Adv)={avg_pytorch/avg_triton_adv:.2f}x")
 
 
 # ============================================================
