@@ -202,7 +202,7 @@ def benchmark_comparison():
     x = torch.randn(1048576, device="cuda")  # 1M 元素
 
     print("\n=== ReLU 性能对比 (1M 元素) ===")
-    benchmark_function(manual_relu, x, "手写 Python")
+    # benchmark_function(manual_relu, x, "手写 Python")
     benchmark_function(torch.relu, x, "PyTorch 原生")
     benchmark_function(relu_wrapper, x, "Triton")
 

@@ -54,47 +54,70 @@ def matmul_simple_kernel(
     Grid: (num_m_blocks, num_n_blocks)
     每个 thread block 处理 C 的一个子块
     """
-    # 确定当前 block 处理 C 的哪个子块
+    # =========================================================
+    # 任务 1: 确定当前 block 在 Grid 中的位置
+    # 提示: 矩阵 C 被切分成了 (num_m_blocks, num_n_blocks) 的网格
+    #       请获取当前 block 在 M 轴 (axis=0) 和 N 轴 (axis=1) 上的 ID
+    # =========================================================
+    pid_m = None  # TODO 1.1: 获取 axis=0 的 program_id
+    pid_n = None  # TODO 1.2: 获取 axis=1 的 program_id
     pid_m = tl.program_id(axis=0)
     pid_n = tl.program_id(axis=1)
 
-    # 子块的起始行/列
-    offset_m = pid_m * BLOCK_SIZE_M + tl.arange(0, BLOCK_SIZE_M)
-    offset_n = pid_n * BLOCK_SIZE_N + tl.arange(0, BLOCK_SIZE_N)
-
-    # 创建 mask
+    # 任务 1 解答
+    # print(f"[matmul_simple_kernel] pid_m: {pid_m}, pid_n: {pid_n}")
+    # =========================================================
+    # 任务 2: 计算当前子块在 C 矩阵中的绝对行索引和列索引 (向量)
+    # 提示: 起始位置 = pid * block_size，再用 tl.arange 加上块内偏移
+    # =========================================================
+    # offset_m = ... # TODO 2.1: 形状为 (BLOCK_SIZE_M,) 的 1D 向量
+    # offset_n = ... # TODO 2.2: 形状为 (BLOCK_SIZE_N,) 的 1D 向量
+    offset_m =pid_m*BLOCK_SIZE_M + tl.arange(0,BLOCK_SIZE_M)
+    offset_n =pid_n*BLOCK_SIZE_N + tl.arange(0,BLOCK_SIZE_N)
+    
+    # 任务 2 解答
+    
+    # print(f"[matmul_simple_kernel] offset_m: {offset_m}, offset_n: {offset_n}")
+    # =========================================================
+    # 任务 3: 创建边界 Mask (保护越界)
+    # 因为矩阵的宽和高 (M, N) 未必能被 BLOCK_SIZE 完美整除
+    # =========================================================
+    # mask_m = ... # TODO 3.1: 判断 offset_m 是否全部小于 M (一维布尔向量)
+    # mask_n = ... # TODO 3.2: 判断 offset_n 是否全部小于 N (一维布尔向量)
     mask_m = offset_m < M
     mask_n = offset_n < N
-    mask = mask_m[:, None] & mask_n[None, :]
 
-    # 初始化累加器
+    mask = mask_m[:, None] & mask_n[None, :]
+    # 任务 4: 初始化用于累加的点积结果 (也就是 C 的这一个小方块)
+    # 提示: 使用 tl.zeros，形状设为 (BLOCK_SIZE_M, BLOCK_SIZE_N)，类型 tl.float32
+    # acc = ... # TODO 4
     acc = tl.zeros((BLOCK_SIZE_M, BLOCK_SIZE_N), dtype=tl.float32)
 
-    # 循环遍历 K 维度
-    for k in range(0, K, BLOCK_SIZE_K):
-        offset_k = k + tl.arange(0, BLOCK_SIZE_K)
-        mask_k = offset_k < K
+    # =========================================================
+    # 任务 5: 沿着 K 维度分块遍历 (最关键的一步！)
+    # 我们把 K 轴也切成一个个大小为 BLOCK_SIZE_K 的片段
+    # =========================================================
+    # for k in range(0, K, BLOCK_SIZE_K):
+    #     # 5.1 获取当前这块 K 的 offset
+    #     # offset_k = ...
+        
+    #     # 5.2 计算 A 子块和 B 子块的指针位置 (最容易出错的地方，二维指针偏移)
+    #     # a_ptrs = A + 行号 * 行的stride + 列号 * 列的stride
+    #     # 注意，为了让一维的行 offset 和 列 offset 组成二维网格，必须用到 [:, None] 和 [None, :]
+    #     # a_ptrs = A + offset_m[:, None] * stride_am + ...
+    #     # b_ptrs = B + ...
+        
+    #     # 5.3 tl.load 进来，然后用 tl.dot(a, b) 加到 acc 上
+    #     # ...
 
-        # 加载 A 的子块 (M_block, K)
-        a_ptrs = A + offset_m[:, None] * stride_am + offset_k[None, :] * stride_ak
-        a_mask = mask_m[:, None] & mask_k[None, :]
-        a = tl.load(a_ptrs, mask=a_mask, other=0.0)
-
-        # 加载 B 的子块 (K, N_block)
-        b_ptrs = B + offset_k[:, None] * stride_bk + offset_n[None, :] * stride_bn
-        b_mask = mask_k[:, None] & mask_n[None, :]
-        b = tl.load(b_ptrs, mask=b_mask, other=0.0)
-
-        # 矩阵乘法 (注意: tl.dot 要求内部维度对齐)
-        acc += tl.dot(a, b)
-
-    # 转回 float16 (如果输入是 fp16)
-    acc = acc.to(C.dtype.element_ty)
-
-    # 写回
-    c_ptrs = C + offset_m[:, None] * stride_cm + offset_n[None, :] * stride_cn
-    tl.store(c_ptrs, acc, mask=mask)
-
+    for k in range(0,K,BLOCK_SIZE_K):
+      offset_k = k+tl.arange(0,BLOCK_SIZE_K)
+      mask_k = offset_k < K
+      a_ptrs = A+offset_m
+    # =========================================================
+    # 任务 6: 存储结果
+    # =========================================================
+    # ...
 
 def matmul_simple_wrapper(A: torch.Tensor, B: torch.Tensor) -> torch.Tensor:
     """包装函数"""
