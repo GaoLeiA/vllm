@@ -2,36 +2,50 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import time
-from typing import Any, TypeAlias
+from typing import TypeAlias
 
-from pydantic import (
-    Field,
-)
+from pydantic import Field
 
+from vllm import PoolingParams
 from vllm.entrypoints.openai.engine.protocol import OpenAIBaseModel, UsageInfo
-from vllm.entrypoints.pooling.base.protocol import (
+from vllm.logger import init_logger
+from vllm.utils import random_uuid
+
+from ..base.protocol import (
     ChatRequestMixin,
     ClassifyRequestMixin,
     CompletionRequestMixin,
+    FixedMaxLenTokenizeParamsMixin,
     PoolingBasicRequestMixin,
 )
-from vllm.utils import random_uuid
+
+logger = init_logger(__name__)
 
 
 class ClassificationCompletionRequest(
-    PoolingBasicRequestMixin, CompletionRequestMixin, ClassifyRequestMixin
+    PoolingBasicRequestMixin,
+    CompletionRequestMixin,
+    ClassifyRequestMixin,
+    FixedMaxLenTokenizeParamsMixin,
 ):
-    pass
+    def to_pooling_params(self):
+        return PoolingParams(
+            task="classify",
+            use_activation=self.use_activation,
+        )
 
 
 class ClassificationChatRequest(
-    PoolingBasicRequestMixin, ChatRequestMixin, ClassifyRequestMixin
+    PoolingBasicRequestMixin,
+    ChatRequestMixin,
+    ClassifyRequestMixin,
+    FixedMaxLenTokenizeParamsMixin,
 ):
-    # --8<-- [start:chat-classification-extra-params]
-    mm_processor_kwargs: dict[str, Any] | None = Field(
-        default=None,
-        description=("Additional kwargs to pass to the HF processor."),
-    )
+    def to_pooling_params(self):
+        return PoolingParams(
+            task="classify",
+            use_activation=self.use_activation,
+        )
 
 
 ClassificationRequest: TypeAlias = (

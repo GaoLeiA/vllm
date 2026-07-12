@@ -35,11 +35,18 @@ class Eagle3ModelConfig:
     id: str = ""
     # Backends that are incompatible with this model (will be skipped)
     excluded_backends: set[AttentionBackendEnum] = field(default_factory=set)
+    # Pytest marks for this configuration
+    marks: list = field(default_factory=list)
+    # Custom relative tolerance (defaults to DEFAULT_RTOL if None)
+    rtol: float | None = None
+    # ROCm-specific test configuration
+    rocm_expected_acceptance_lengths_per_pos: list[float] = field(default_factory=list)
 
 
 # Model configurations for EAGLE3 acceptance length tests.
 # Expected acceptance lengths are determined by running baseline benchmarks
-# using examples/offline_inference/spec_decode.py with the MT-Bench dataset.
+# using examples/features/speculative_decoding/spec_decode_offline.py
+# with the MT-Bench dataset.
 EAGLE3_MODEL_CONFIGS = [
     Eagle3ModelConfig(
         verifier="meta-llama/Llama-3.1-8B-Instruct",
@@ -64,6 +71,18 @@ EAGLE3_MODEL_CONFIGS = [
         # FLASHINFER incompatible: gpt-oss-20b uses sink attention which
         # FLASHINFER does not support ("sink setting not supported")
         excluded_backends={AttentionBackendEnum.FLASHINFER},
+        rocm_expected_acceptance_lengths_per_pos=[0.7040, 0.4820, 0.3350],
+    ),
+    Eagle3ModelConfig(
+        verifier="Qwen/Qwen3-VL-30B-A3B-Instruct-FP8",
+        drafter="nm-testing/Speculator-Qwen3-30B-MOE-VL-Eagle3",
+        expected_acceptance_length=1.35,
+        expected_acceptance_lengths_per_pos=[0.2900, 0.0620, 0.0115],
+        id="qwen3-30b-moe-vl-eagle3",
+        marks=[
+            pytest.mark.slow_test,
+        ],
+        rtol=0.15,  # Higher tolerance due to small absolute values at position 2
     ),
 ]
 
@@ -83,16 +102,14 @@ EXCLUDED_BACKENDS = {AttentionBackendEnum.FLEX_ATTENTION}
 
 
 def get_available_attention_backends() -> list[str]:
+    if current_platform.is_rocm():
+        return ["auto"]
+
     # Check if get_valid_backends is actually defined in the platform class
     # (not just returning None from __getattr__)
     get_valid_backends = getattr(current_platform.__class__, "get_valid_backends", None)
     if get_valid_backends is None:
-        if current_platform.is_rocm():
-            # ROCm uses Triton as its default attention backend since
-            # Flash Attention is not supported.
-            return ["TRITON_ATTN"]
-        else:
-            return ["FLASH_ATTN"]
+        return ["FLASH_ATTN"]
 
     device_capability = current_platform.get_device_capability()
     if device_capability is None:
@@ -115,9 +132,9 @@ def get_available_attention_backends() -> list[str]:
     )
 
     return [
-        backend.name
-        for backend, _ in valid_backends
-        if backend not in EXCLUDED_BACKENDS
+        candidate.backend.name
+        for candidate in valid_backends
+        if candidate.backend not in EXCLUDED_BACKENDS
     ]
 
 
@@ -126,7 +143,7 @@ def get_attention_backend_params() -> list[str]:
 
 
 def get_tp_size_params() -> list[pytest.param]:
-    num_gpus = torch.cuda.device_count() if torch.cuda.is_available() else 1
+    num_gpus = torch.accelerator.device_count() if torch.cuda.is_available() else 1
     return [pytest.param(tp, id=f"tp{tp}") for tp in TP_SIZES if tp <= num_gpus]
 
 
@@ -150,6 +167,9 @@ def get_mt_bench_prompts(
         no_stream=True,
         disable_shuffle=False,
         skip_chat_template=False,
+        trust_remote_code=False,
+        enable_multimodal_chat=False,
+        request_id_prefix="",
     )
     samples = get_samples(args, tokenizer)
     prompt_ids = [
@@ -194,9 +214,16 @@ def extract_acceptance_metrics(metrics, num_spec_tokens: int) -> dict:
 
 
 @large_gpu_mark(min_gb=40)
+@pytest.mark.skipif(
+    not current_platform.is_cuda_alike(),
+    reason="This test is only supported on CUDA-alike platforms.",
+)
 @pytest.mark.parametrize(
     "model_config",
-    [pytest.param(config, id=config.id) for config in EAGLE3_MODEL_CONFIGS],
+    [
+        pytest.param(config, id=config.id, marks=config.marks)
+        for config in EAGLE3_MODEL_CONFIGS
+    ],
 )
 @pytest.mark.parametrize("num_spec_tokens", [DEFAULT_NUM_SPEC_TOKENS])
 @pytest.mark.parametrize("tp_size", get_tp_size_params())
@@ -209,9 +236,12 @@ def test_eagle3_acceptance_length(
     monkeypatch: pytest.MonkeyPatch,
 ):
     # Skip if this backend is incompatible with the model
-    backend_enum = AttentionBackendEnum[attention_backend]
-    if backend_enum in model_config.excluded_backends:
-        pytest.skip(f"{attention_backend} is incompatible with {model_config.id}")
+    attention_config = None
+    if attention_backend != "auto":
+        backend_enum = AttentionBackendEnum[attention_backend]
+        if backend_enum in model_config.excluded_backends:
+            pytest.skip(f"{attention_backend} is incompatible with {model_config.id}")
+        attention_config = {"backend": attention_backend}
 
     with monkeypatch.context() as m:
         m.setenv("VLLM_ALLOW_INSECURE_SERIALIZATION", "1")
@@ -223,11 +253,16 @@ def test_eagle3_acceptance_length(
                 "model": model_config.drafter,
                 "num_speculative_tokens": num_spec_tokens,
             },
-            attention_config={"backend": attention_backend},
+            attention_config=attention_config,
             tensor_parallel_size=tp_size,
             gpu_memory_utilization=0.7,
             disable_log_stats=False,
             max_model_len=DEFAULT_MAX_MODEL_LEN,
+            # Qwen/Qwen3-30B-A3B-FP8 with TP=4 needs EP
+            # https://github.com/vllm-project/vllm/issues/25292
+            enable_expert_parallel=(
+                tp_size == 4 and "Qwen3-VL" in model_config.verifier
+            ),
         ) as vllm_runner:
             tokenizer = vllm_runner.llm.get_tokenizer()
             prompt_ids = get_mt_bench_prompts(tokenizer, DEFAULT_NUM_PROMPTS)
@@ -248,9 +283,15 @@ def test_eagle3_acceptance_length(
             expected = model_config.expected_acceptance_length
             actual_per_pos = results["acceptance_lengths_per_pos"]
             expected_per_pos = model_config.expected_acceptance_lengths_per_pos
+            if (
+                current_platform.is_rocm()
+                and model_config.rocm_expected_acceptance_lengths_per_pos
+            ):
+                expected_per_pos = model_config.rocm_expected_acceptance_lengths_per_pos
 
             rel_error = abs(actual_acceptance_length - expected) / expected
 
+            # Overall acceptance length always uses DEFAULT_RTOL
             assert rel_error <= DEFAULT_RTOL, (
                 f"Acceptance length regression detected for {model_config.id}!\n"
                 f"  Expected: {expected:.3f}\n"
@@ -261,18 +302,22 @@ def test_eagle3_acceptance_length(
             )
 
             if expected_per_pos and len(expected_per_pos) == len(actual_per_pos):
+                # Per-position checks use model-specific rtol if provided
+                rtol = (
+                    model_config.rtol if model_config.rtol is not None else DEFAULT_RTOL
+                )
                 for pos, (actual, exp) in enumerate(
                     zip(actual_per_pos, expected_per_pos)
                 ):
                     if exp > 0:
-                        pos_rel_error = abs(actual - exp) / exp
-                        assert pos_rel_error <= DEFAULT_RTOL, (
+                        min_expected = exp * (1 - rtol)
+                        assert actual >= min_expected, (
                             f"Per-position acceptance length regression at pos {pos} "
                             f"for {model_config.id}!\n"
                             f"  Expected: {exp:.3f}\n"
                             f"  Actual:   {actual:.3f}\n"
-                            f"  Relative error: {pos_rel_error:.2%} "
-                            f"(tolerance: {DEFAULT_RTOL:.2%})"
+                            f"  Minimum:  {min_expected:.3f}\n"
+                            f"  Tolerance: rtol={rtol:.2%}"
                         )
 
             print(

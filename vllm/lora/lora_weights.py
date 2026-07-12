@@ -2,13 +2,12 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 from collections.abc import Sequence as GenericSequence
-from typing import Optional
 
 import torch
 import torch.types
 
 from vllm.lora.peft_helper import PEFTHelper
-from vllm.utils.platform_utils import is_pin_memory_available
+from vllm.utils.torch_utils import PIN_MEMORY
 
 
 class LoRALayerWeights:
@@ -80,7 +79,7 @@ class LoRALayerWeights:
         dtype: torch.dtype,
         device: torch.types.Device,
     ) -> "LoRALayerWeights":
-        pin_memory = str(device) == "cpu" and is_pin_memory_available()
+        pin_memory = str(device) == "cpu" and PIN_MEMORY
         lora_a = torch.zeros(
             [rank, input_dim], dtype=dtype, device=device, pin_memory=pin_memory
         )
@@ -126,7 +125,7 @@ class PackedLoRALayerWeights(LoRALayerWeights):
 
     @classmethod
     def pack(
-        cls, loras: GenericSequence[Optional["LoRALayerWeights"]]
+        cls, loras: GenericSequence["LoRALayerWeights | None"]
     ) -> "PackedLoRALayerWeights":
         """Pack a list of LoRAs into a single LoRA.
 
@@ -155,7 +154,7 @@ class PackedLoRALayerWeights(LoRALayerWeights):
     @classmethod
     def pack_moe(
         cls,
-        loras: GenericSequence[Optional["LoRALayerWeights"]],
+        loras: GenericSequence["LoRALayerWeights | None"],
         module_name: str,
         is_non_gated_moe: bool = False,
     ) -> "PackedLoRALayerWeights":

@@ -15,6 +15,7 @@ from torch._prims_common import TensorLikeType
 from tests.kernels.quant_utils import native_w8a8_block_matmul
 from vllm.model_executor.custom_op import op_registry
 from vllm.model_executor.layers.activation import SiluAndMul
+from vllm.model_executor.layers.fused_moe.activation import MoEActivation
 from vllm.model_executor.layers.fused_moe.utils import moe_kernel_quantize_input
 from vllm.utils.torch_utils import make_tensor_with_pad
 from vllm.v1.attention.backend import AttentionType
@@ -808,6 +809,35 @@ def fp8_allclose(
     )
 
 
+def bf16_ulp_distance(a: torch.Tensor, b: torch.Tensor) -> torch.Tensor:
+    """Representable-step distance between two bf16 tensors.
+
+    Reinterprets the bf16 bit patterns under the IEEE-754 total ordering so
+    that adjacent representable values differ by exactly 1.
+    """
+
+    def key(t: torch.Tensor) -> torch.Tensor:
+        u = t.contiguous().view(torch.int16).to(torch.int64) & 0xFFFF
+        return torch.where(u >= 0x8000, 0xFFFF - u, u + 0x8000)
+
+    return (key(a) - key(b)).abs()
+
+
+def fp8_ulp_distance(a: torch.Tensor, b: torch.Tensor) -> torch.Tensor:
+    """Representable-step distance between two 8-bit fp8 tensors.
+
+    Reinterprets the fp8 bytes under a sign-magnitude total ordering so that
+    adjacent representable values differ by exactly 1. Inputs must already share
+    the same fp8 encoding (e.g. both FP8_STORE_DTYPE).
+    """
+
+    def key(t: torch.Tensor) -> torch.Tensor:
+        u = t.contiguous().view(torch.uint8).to(torch.int64)
+        return torch.where(u >= 0x80, 0xFF - u, u + 0x80)
+
+    return (key(a) - key(b)).abs()
+
+
 # Marlin MoE test utils
 
 
@@ -840,7 +870,7 @@ def torch_experts(
     per_act_token_quant=False,
     block_shape: list[int] | None = None,
     apply_router_weights_on_input: bool = False,
-    activation: str = "silu_and_mul",
+    activation: MoEActivation = MoEActivation.SILU,
 ) -> torch.Tensor:
     assert (
         global_num_experts == -1
@@ -883,7 +913,7 @@ def torch_experts(
 
     f32 = torch.float32
 
-    act = op_registry[activation]
+    act = op_registry[activation.custom_op_name]
 
     for i in range(num_experts):
         mask = topk_ids == i
@@ -940,7 +970,7 @@ def torch_experts(
                 if b_bias1 is not None:
                     tmp1 = tmp1 + b_bias1[i].view(1, -1).to(out.dtype)
 
-                tmp2 = SiluAndMul()(tmp1).to(out.dtype)
+                tmp2 = act()(tmp1).to(out.dtype)
 
                 tmp2, b_scale = moe_kernel_quantize_input(
                     tmp2, a2_scale, quant_dtype, per_act_token_quant, block_shape
@@ -973,7 +1003,7 @@ def torch_moe(
     b_bias2: torch.Tensor | None = None,
     global_num_experts: int = -1,
     expert_map: torch.Tensor | None = None,
-    activation: str = "silu_and_mul",
+    activation: MoEActivation = MoEActivation.SILU,
 ) -> torch.Tensor:
     score = torch.softmax(score, dim=-1, dtype=torch.float32)
     topk_weight, topk_ids = torch.topk(score, topk)

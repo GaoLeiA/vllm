@@ -11,9 +11,10 @@ from tests.kernels.quant_utils import (
     native_per_token_group_quant_fp8,
     native_w8a8_block_matmul,
 )
+from tests.kernels.utils import fp8_ulp_distance
 from vllm.config import VllmConfig
+from vllm.model_executor.kernels.linear.scaled_mm.cutlass import cutlass_scaled_mm
 from vllm.model_executor.layers.quantization.utils.fp8_utils import (
-    cutlass_scaled_mm,
     per_token_group_quant_fp8,
     w8a8_triton_block_scaled_mm,
 )
@@ -37,13 +38,15 @@ vllm_config = VllmConfig()
 
 # Test configurations
 DTYPES = [torch.bfloat16]  # [torch.half, torch.bfloat16, torch.float32]
+# Quantization test configs
 NUM_TOKENS = [7, 2050]
 D = [512, 4096, 5120, 13824]
 GROUP_SIZE = [64, 128, 512]
 COLUMN_MAJOR_SCALES = [True, False]
 TMA_ALIGNED_SCALES = [True, False]
-M = [1, 7, 8, 83, 84, 4096]
-N = [128, 512, 7168, 7748, 13824]
+# Matmul test configs
+M = [1, 7, 8, 83, 4096]
+N = [128, 512, 576, 7168, 13824]
 K = [256, 3884, 4096, 13824, 16384]
 # Deepseek-V3's intermediate size 18432, so N is 18432*2/8=4608 at TP8
 # and its hidden size is 7168.
@@ -91,7 +94,24 @@ def test_per_token_group_quant_fp8(
         tma_aligned_scales=tma_aligned_scales,
     )
 
-    assert torch.allclose(out.to(torch.float32), ref_out.to(torch.float32), rtol=0.15)
+    if current_platform.is_rocm():
+        # On gfx950 the Triton and PyTorch FP8 kernels can round in opposite
+        # directions when an element lands at the midpoint between two adjacent
+        # e4m3fn values (1-ULP tie-breaking). Verify: (1) no element is more
+        # than 1 FP8 ULP away, and (2) fewer than 0.05% of elements have any
+        # mismatch. Observed worst case across all parameter combos: 0.049%,
+        # max ULP = 1.
+        ulp = fp8_ulp_distance(out, ref_out)
+        assert (ulp <= 1).all(), (
+            f"FP8 mismatch > 1 ULP: {int((ulp > 1).sum())} elements"
+        )
+        assert float((ulp > 0).float().mean()) < 5e-4, (
+            f"Too many 1-ULP mismatches: {int((ulp > 0).sum())}/{ulp.numel()}"
+        )
+    else:
+        assert torch.allclose(
+            out.to(torch.float32), ref_out.to(torch.float32), rtol=0.15
+        )
     assert torch.allclose(scale, ref_scale)
 
     if column_major_scales:
@@ -162,8 +182,6 @@ def test_w8a8_block_fp8_cutlass_matmul():
     k_tiles = (K + block_k - 1) // block_k
 
     Bs = torch.rand(n_tiles, k_tiles, dtype=torch.float32) * factor_for_scale
-    # Hopper requires row-major format for scales
-    Bs_cutlass = Bs.T.contiguous() if current_platform.is_device_capability(90) else Bs
 
     A_fp8, As = per_token_group_quant_fp8(
         A_fp32, block_size[1], column_major_scales=False
@@ -174,9 +192,7 @@ def test_w8a8_block_fp8_cutlass_matmul():
     )
 
     ref_out = native_w8a8_block_matmul(A_fp8, B_fp8, As, Bs, block_size, out_dtype)
-    out = cutlass_scaled_mm(
-        A_fp8_cutlass, B_fp8, As_cutlass, Bs_cutlass, block_size, out_dtype
-    )
+    out = cutlass_scaled_mm(A_fp8_cutlass, B_fp8, As_cutlass, Bs, block_size, out_dtype)
 
     rel_diff = torch.mean(
         torch.abs(out.to(torch.float32) - ref_out.to(torch.float32))
@@ -204,7 +220,7 @@ def test_w8a8_block_fp8_deep_gemm_matmul(M, N, K, block_size, out_dtype, seed):
 
     # only aligned sizes are supported by deepgemm
     if not should_use_deepgemm_for_fp8_linear(
-        output_dtype=out_dtype, weight=B_fp32, supports_deep_gemm=True
+        output_dtype=out_dtype, weight_shape=B_fp32.shape, supports_deep_gemm=True
     ):
         pytest.skip(f"Skipping test; invalid size {M}, {N}, {K}")
 

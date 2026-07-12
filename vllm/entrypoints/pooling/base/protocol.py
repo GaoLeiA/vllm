@@ -2,14 +2,18 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 
-from typing import Annotated, Any
+from typing import Annotated, Any, Literal
 
 from pydantic import Field, model_validator
 
-from vllm import PoolingParams
-from vllm.config.pooler import get_use_activation
-from vllm.entrypoints.chat_utils import ChatCompletionMessageParam
+from vllm.config import ModelConfig
+from vllm.entrypoints.chat_utils import (
+    ChatCompletionMessageParam,
+    ChatTemplateContentFormatOption,
+)
 from vllm.entrypoints.openai.engine.protocol import OpenAIBaseModel
+from vllm.exceptions import VLLMValidationError
+from vllm.renderers import ChatParams, TokenizeParams, merge_kwargs
 from vllm.utils import random_uuid
 from vllm.utils.serial_utils import EmbedDType, EncodingFormat, Endianness
 
@@ -22,6 +26,14 @@ class PoolingBasicRequestMixin(OpenAIBaseModel):
 
     # --8<-- [start:pooling-common-extra-params]
     truncate_prompt_tokens: Annotated[int, Field(ge=-1)] | None = None
+    truncation_side: Literal["left", "right"] | None = Field(
+        default=None,
+        description=(
+            "Which side to truncate from when truncate_prompt_tokens is active. "
+            "'right' keeps the first N tokens. "
+            "'left' keeps the last N tokens."
+        ),
+    )
     request_id: str = Field(
         default_factory=random_uuid,
         description=(
@@ -32,13 +44,127 @@ class PoolingBasicRequestMixin(OpenAIBaseModel):
     )
     priority: int = Field(
         default=0,
+        ge=-(2**63),
+        le=2**63 - 1,
         description=(
             "The priority of the request (lower means earlier handling; "
             "default: 0). Any priority other than 0 will raise an error "
             "if the served model does not use priority scheduling."
         ),
     )
+    mm_processor_kwargs: dict[str, Any] | None = Field(
+        default=None,
+        description="Additional kwargs to pass to the HF processor.",
+    )
+    cache_salt: str | None = Field(
+        default=None,
+        description=(
+            "If specified, the prefix cache will be salted with the provided "
+            "string to prevent an attacker to guess prompts in multi-user "
+            "environments. The salt should be random, protected from "
+            "access by 3rd parties, and long enough to be "
+            "unpredictable (e.g., 43 characters base64-encoded, corresponding "
+            "to 256 bit)."
+        ),
+    )
     # --8<-- [end:pooling-common-extra-params]
+
+    @model_validator(mode="before")
+    @classmethod
+    def check_cache_salt_support(cls, data):
+        if not isinstance(data, dict):
+            return data
+
+        if data.get("cache_salt") is not None and (
+            not isinstance(data["cache_salt"], str) or not data["cache_salt"]
+        ):
+            raise VLLMValidationError(
+                "Parameter 'cache_salt' must be a non-empty string if provided.",
+                parameter="cache_salt",
+            )
+        return data
+
+    def _build_pooling_tok_params(
+        self,
+        model_config: ModelConfig,
+        *,
+        add_special_tokens: bool,
+        max_total_tokens: int | None,
+        max_output_tokens: int,
+        max_total_tokens_param: str = "max_model_len",
+        max_output_tokens_param: str | None = None,
+    ) -> TokenizeParams:
+        encoder_config = model_config.encoder_config or {}
+        if max_output_tokens_param is None:
+            return TokenizeParams(
+                max_total_tokens=max_total_tokens,
+                max_output_tokens=max_output_tokens,
+                truncate_prompt_tokens=self.truncate_prompt_tokens,
+                truncation_side=self.truncation_side,
+                do_lower_case=encoder_config.get("do_lower_case", False),
+                add_special_tokens=add_special_tokens,
+                max_total_tokens_param=max_total_tokens_param,
+            )
+
+        return TokenizeParams(
+            max_total_tokens=max_total_tokens,
+            max_output_tokens=max_output_tokens,
+            truncate_prompt_tokens=self.truncate_prompt_tokens,
+            truncation_side=self.truncation_side,
+            do_lower_case=encoder_config.get("do_lower_case", False),
+            add_special_tokens=add_special_tokens,
+            max_total_tokens_param=max_total_tokens_param,
+            max_output_tokens_param=max_output_tokens_param,
+        )
+
+
+class PoolingTokenizeParamsMixin:
+    add_special_tokens: bool
+
+    def _build_pooling_tok_params(
+        self,
+        model_config: ModelConfig,
+        *,
+        add_special_tokens: bool,
+        max_total_tokens: int | None,
+        max_output_tokens: int,
+        max_total_tokens_param: str = "max_model_len",
+        max_output_tokens_param: str | None = None,
+    ) -> TokenizeParams:
+        raise NotImplementedError
+
+
+class FixedMaxLenTokenizeParamsMixin(PoolingTokenizeParamsMixin):
+    def build_tok_params(self, model_config: ModelConfig) -> TokenizeParams:
+        return self._build_pooling_tok_params(
+            model_config,
+            add_special_tokens=self.add_special_tokens,
+            max_total_tokens=model_config.max_model_len,
+            max_output_tokens=0,
+        )
+
+
+class EmbeddingTokenizeParamsMixin(PoolingTokenizeParamsMixin):
+    def build_tok_params(self, model_config: ModelConfig) -> TokenizeParams:
+        default_max_total_tokens = model_config.max_model_len
+        max_total_tokens: int | None = default_max_total_tokens
+        max_output_tokens = 0
+
+        pooler_config = model_config.pooler_config
+        if pooler_config is not None:
+            if pooler_config.enable_chunked_processing:
+                max_total_tokens = None
+            else:
+                max_embed_len = pooler_config.max_embed_len or default_max_total_tokens
+                max_output_tokens = default_max_total_tokens - max_embed_len
+
+        return self._build_pooling_tok_params(
+            model_config,
+            add_special_tokens=self.add_special_tokens,
+            max_total_tokens=max_total_tokens,
+            max_output_tokens=max_output_tokens,
+            max_output_tokens_param="max_model_len - max_embed_len",
+        )
 
 
 class CompletionRequestMixin(OpenAIBaseModel):
@@ -57,11 +183,7 @@ class CompletionRequestMixin(OpenAIBaseModel):
     # --8<-- [end:completion-extra-params]
 
 
-class ChatRequestMixin(OpenAIBaseModel):
-    # --8<-- [start:chat-params]
-    messages: list[ChatCompletionMessageParam]
-    # --8<-- [end:chat-params]
-
+class ChatRequestOptionsMixin(OpenAIBaseModel):
     # --8<-- [start:chat-extra-params]
     add_generation_prompt: bool = Field(
         default=False,
@@ -107,17 +229,48 @@ class ChatRequestMixin(OpenAIBaseModel):
             "Will be accessible by the chat template."
         ),
     )
+    media_io_kwargs: dict[str, dict[str, Any]] | None = Field(
+        default=None,
+        description=(
+            "Additional kwargs to pass to the media IO connectors, "
+            "keyed by modality. Merged with engine-level media_io_kwargs."
+        ),
+    )
     # --8<-- [end:chat-extra-params]
 
     @model_validator(mode="before")
     @classmethod
     def check_generation_prompt(cls, data):
         if data.get("continue_final_message") and data.get("add_generation_prompt"):
-            raise ValueError(
+            raise VLLMValidationError(
                 "Cannot set both `continue_final_message` and "
-                "`add_generation_prompt` to True."
+                "`add_generation_prompt` to True.",
             )
         return data
+
+    def build_chat_params(
+        self,
+        default_template: str | None,
+        default_template_content_format: ChatTemplateContentFormatOption,
+    ) -> ChatParams:
+        return ChatParams(
+            chat_template=self.chat_template or default_template,
+            chat_template_content_format=default_template_content_format,
+            chat_template_kwargs=merge_kwargs(
+                self.chat_template_kwargs,
+                dict(
+                    add_generation_prompt=self.add_generation_prompt,
+                    continue_final_message=self.continue_final_message,
+                ),
+            ),
+            media_io_kwargs=self.media_io_kwargs,
+        )
+
+
+class ChatRequestMixin(ChatRequestOptionsMixin):
+    # --8<-- [start:chat-params]
+    messages: list[ChatCompletionMessageParam]
+    # --8<-- [end:chat-params]
 
 
 class EncodingRequestMixin(OpenAIBaseModel):
@@ -151,39 +304,19 @@ class EmbedRequestMixin(EncodingRequestMixin):
     # --8<-- [end:embed-params]
 
     # --8<-- [start:embed-extra-params]
-    normalize: bool | None = Field(
+    use_activation: bool | None = Field(
         default=None,
-        description="Whether to normalize the embeddings outputs. Default is True.",
+        description="Whether to use activation for the pooler outputs. "
+        "`None` uses the pooler's default, which is `True` in most cases.",
     )
     # --8<-- [end:embed-extra-params]
-
-    def to_pooling_params(self):
-        return PoolingParams(
-            dimensions=self.dimensions,
-            use_activation=self.normalize,
-            truncate_prompt_tokens=getattr(self, "truncate_prompt_tokens", None),
-        )
 
 
 class ClassifyRequestMixin(OpenAIBaseModel):
     # --8<-- [start:classify-extra-params]
-    softmax: bool | None = Field(
-        default=None,
-        description="softmax will be deprecated, please use use_activation instead.",
-    )
-    activation: bool | None = Field(
-        default=None,
-        description="activation will be deprecated, please use use_activation instead.",
-    )
     use_activation: bool | None = Field(
         default=None,
-        description="Whether to use activation for classification outputs. "
-        "Default is True.",
+        description="Whether to use activation for the pooler outputs. "
+        "`None` uses the pooler's default, which is `True` in most cases.",
     )
     # --8<-- [end:classify-extra-params]
-
-    def to_pooling_params(self):
-        return PoolingParams(
-            use_activation=get_use_activation(self),
-            truncate_prompt_tokens=getattr(self, "truncate_prompt_tokens", None),
-        )

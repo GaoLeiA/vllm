@@ -3,6 +3,7 @@
 
 import torch
 
+import vllm.envs as envs
 from tests.v1.kv_connector.unit.utils import MockKVConfig
 from vllm.config import (
     CacheConfig,
@@ -24,10 +25,12 @@ from vllm.utils.hashing import sha256
 from vllm.v1.core.kv_cache_utils import get_request_block_hasher, init_none_hash
 from vllm.v1.core.sched.async_scheduler import AsyncScheduler
 from vllm.v1.core.sched.scheduler import Scheduler
+from vllm.v1.core.single_type_kv_cache_manager import register_all_kvcache_specs
 from vllm.v1.kv_cache_interface import (
     FullAttentionSpec,
     KVCacheConfig,
     KVCacheGroupSpec,
+    KVCacheSpec,
 )
 from vllm.v1.request import Request
 from vllm.v1.structured_output import StructuredOutputManager
@@ -47,16 +50,21 @@ def create_scheduler(
     enable_prefix_caching: bool = False,
     long_prefill_token_threshold: int = 0,
     disable_chunked_mm_input: bool = False,
-    use_kv_connector: None | bool | MockKVConfig = None,
+    use_kv_connector: None | bool | str | MockKVConfig = None,
     num_blocks: int = 10000,
     block_size: int = 16,
     max_model_len: int | None = None,
     num_speculative_tokens: int | None = None,
+    speculative_method: str | None = None,
     skip_tokenizer_init: bool = False,
     async_scheduling: bool = False,
     pipeline_parallel_size: int = 1,
+    data_parallel_size: int = 1,
+    num_speculative_tokens_per_batch_size: list[tuple[int, int, int]] | None = None,
     use_ec_connector: bool = False,
     ec_role: str | None = None,
+    use_v2_model_runner: bool | None = None,
+    kv_cache_spec: KVCacheSpec | None = None,
 ) -> Scheduler | AsyncScheduler:
     """Create scheduler under test.
 
@@ -89,12 +97,13 @@ def create_scheduler(
         enable_chunked_prefill=enable_chunked_prefill,
         async_scheduling=async_scheduling,
         is_encoder_decoder=model_config.is_encoder_decoder,
+        # Ensure admission/preemption mechanics are deterministic
+        watermark=0.0,
     )
     # Cache config, optionally force APC
     cache_config = CacheConfig(
         block_size=block_size,
         gpu_memory_utilization=0.9,
-        swap_space=0,
         cache_dtype="auto",
         enable_prefix_caching=enable_prefix_caching,
     )
@@ -108,6 +117,11 @@ def create_scheduler(
                 "is_async": use_kv_connector.is_async,
             },
         )
+    elif isinstance(use_kv_connector, str):
+        kv_transfer_config = KVTransferConfig(
+            kv_connector=use_kv_connector,
+            kv_role="kv_both",
+        )
     elif use_kv_connector:
         kv_transfer_config = KVTransferConfig(
             kv_connector="ExampleConnector",
@@ -117,9 +131,18 @@ def create_scheduler(
 
     speculative_config: SpeculativeConfig | None = None
     if num_speculative_tokens is not None:
-        speculative_config = SpeculativeConfig(
+        spec_kwargs: dict = dict(
             model="ngram", num_speculative_tokens=num_speculative_tokens
         )
+        if num_speculative_tokens_per_batch_size is not None:
+            spec_kwargs["num_speculative_tokens_per_batch_size"] = (
+                num_speculative_tokens_per_batch_size
+            )
+        if speculative_method is not None:
+            spec_kwargs["method"] = speculative_method
+            spec_kwargs["prompt_lookup_max"] = num_speculative_tokens
+            spec_kwargs["prompt_lookup_min"] = 1
+        speculative_config = SpeculativeConfig(**spec_kwargs)
 
     ec_transfer_config = (
         ECTransferConfig(
@@ -135,35 +158,40 @@ def create_scheduler(
         scheduler_config=scheduler_config,
         model_config=model_config,
         cache_config=cache_config,
-        parallel_config=ParallelConfig(pipeline_parallel_size=pipeline_parallel_size),
+        parallel_config=ParallelConfig(
+            pipeline_parallel_size=pipeline_parallel_size,
+            data_parallel_size=data_parallel_size,
+        ),
         kv_transfer_config=kv_transfer_config,
         speculative_config=speculative_config,
         ec_transfer_config=ec_transfer_config,
     )
+    if kv_cache_spec is None:
+        kv_cache_spec = FullAttentionSpec(
+            block_size=block_size,
+            num_kv_heads=1,
+            head_size=1,
+            dtype=torch.float32,
+        )
     kv_cache_config = KVCacheConfig(
         num_blocks=num_blocks,  # A large number of blocks to hold all requests
         kv_cache_tensors=[],
-        kv_cache_groups=[
-            KVCacheGroupSpec(
-                ["layer"],
-                FullAttentionSpec(
-                    block_size=block_size,
-                    num_kv_heads=1,
-                    head_size=1,
-                    dtype=torch.float32,
-                ),
-            )
-        ],
+        kv_cache_groups=[KVCacheGroupSpec(["layer"], kv_cache_spec)],
     )
     cache_config.num_gpu_blocks = num_blocks
+    register_all_kvcache_specs(vllm_config)
     scheduler_cls = AsyncScheduler if async_scheduling else Scheduler
-    return scheduler_cls(
+    scheduler = scheduler_cls(
         vllm_config=vllm_config,
         kv_cache_config=kv_cache_config,
         block_size=block_size,
         log_stats=True,
         structured_output_manager=StructuredOutputManager(vllm_config),
     )
+    if use_v2_model_runner is None:
+        use_v2_model_runner = bool(envs.VLLM_USE_V2_MODEL_RUNNER)
+    scheduler.use_v2_model_runner = use_v2_model_runner
+    return scheduler
 
 
 _none_hash_initialized = False
@@ -174,6 +202,7 @@ def create_requests(
     num_tokens: int = 10,
     mm_hashes_list: list[list[str]] | None = None,
     mm_positions: list[list[PlaceholderRange]] | None = None,
+    ignore_eos: bool = False,
     max_tokens: int = 16,
     stop_token_ids: list[int] | None = None,
     prompt_logprobs: int | None = None,
@@ -188,11 +217,12 @@ def create_requests(
 
     block_hasher = get_request_block_hasher(block_size, sha256)
     sampling_params = SamplingParams(
-        ignore_eos=False,
+        ignore_eos=ignore_eos,
         max_tokens=max_tokens,
         stop_token_ids=stop_token_ids,
         prompt_logprobs=prompt_logprobs,
     )
+    sampling_params.update_from_generation_config({}, EOS_TOKEN_ID)
     requests = []
 
     if mm_hashes_list is not None:
@@ -236,7 +266,7 @@ def create_requests(
                 # Unique dummy hash for each mm item
                 identifier = f"hash{i}_{j}"
             mm_feature = MultiModalFeatureSpec(
-                data=MultiModalKwargsItem.dummy("dummy_m"),
+                data=MultiModalKwargsItem.dummy(),
                 mm_position=position,
                 identifier=identifier,
                 modality="image",
@@ -250,7 +280,6 @@ def create_requests(
             sampling_params=sampling_params,
             pooling_params=None,
             mm_features=mm_features if mm_features else None,
-            eos_token_id=EOS_TOKEN_ID,
             block_hasher=block_hasher,
         )
         requests.append(request)

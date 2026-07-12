@@ -1,11 +1,11 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-import base64
 import json
 
 import numpy as np
 import openai
+import pybase64 as base64
 import pytest
 import pytest_asyncio
 import requests
@@ -17,16 +17,14 @@ from tests.models.utils import check_embeddings_close
 from tests.utils import RemoteOpenAIServer
 from vllm.entrypoints.pooling.embed.protocol import EmbeddingResponse
 from vllm.entrypoints.pooling.pooling.protocol import PoolingResponse
-from vllm.platforms import current_platform
-from vllm.tokenizers import get_tokenizer
-from vllm.utils.serial_utils import (
-    EMBED_DTYPE_TO_TORCH_DTYPE,
-    ENDIANNESS,
+from vllm.entrypoints.pooling.utils import (
     MetadataItem,
-    binary2tensor,
     build_metadata_items,
     decode_pooling_output,
 )
+from vllm.platforms import current_platform
+from vllm.tokenizers import get_tokenizer
+from vllm.utils.serial_utils import EMBED_DTYPES, ENDIANNESS, binary2tensor
 
 MODEL_NAME = "intfloat/multilingual-e5-small"
 DUMMY_CHAT_TEMPLATE = """{% for message in messages %}{{message['role'] + ': ' + message['content'] + '\\n'}}{% endfor %}"""  # noqa: E501
@@ -60,13 +58,19 @@ if current_platform.is_rocm():
     torch.backends.cuda.enable_mem_efficient_sdp(False)
     torch.backends.cuda.enable_math_sdp(True)
 
+# On ROCm, floating-point reductions in attention and GEMM kernels are
+# non-associative and sensitive to batch geometry. Force LLM instances
+# into an identical, deterministic execution mode:
+ROCM_DETERMINISM_ARGS: list[str] = (
+    ["--max-num-seqs", "1"] if current_platform.is_rocm() else []
+)
+
 
 @pytest.fixture(scope="module")
 def server():
     args = [
         "--runner",
         "pooling",
-        # use half precision for speed and memory savings in CI environment
         "--dtype",
         DTYPE,
         "--enforce-eager",
@@ -74,11 +78,8 @@ def server():
         "512",
         "--chat-template",
         DUMMY_CHAT_TEMPLATE,
+        *ROCM_DETERMINISM_ARGS,
     ]
-
-    # ROCm: Use Flex Attention to support encoder-only self-attention.
-    if current_platform.is_rocm():
-        args.extend(["--attention-backend", "FLEX_ATTENTION"])
 
     with RemoteOpenAIServer(MODEL_NAME, args) as remote_server:
         yield remote_server
@@ -287,7 +288,7 @@ async def test_truncate_prompt_tokens(client: openai.AsyncOpenAI, model_name: st
         assert "error" in response.object
         assert (
             "truncate_prompt_tokens value is greater than max_model_len. "
-            "Please, select a smaller truncation size." in response.message
+            "Please request a smaller truncation size." in response.message
         )
 
 
@@ -345,8 +346,15 @@ async def test_chat_request(
     assert chat_embeddings.id is not None
     assert completion_embeddings.id is not None
     assert chat_embeddings.created <= completion_embeddings.created
-    assert chat_embeddings.model_dump(exclude={"id", "created"}) == (
-        completion_embeddings.model_dump(exclude={"id", "created"})
+    # Use tolerance-based comparison for embeddings
+    check_embeddings_close(
+        embeddings_0_lst=[d.embedding for d in chat_embeddings.data],
+        embeddings_1_lst=[d.embedding for d in completion_embeddings.data],
+        name_0="chat",
+        name_1="completion",
+    )
+    assert chat_embeddings.model_dump(exclude={"id", "created", "data"}) == (
+        completion_embeddings.model_dump(exclude={"id", "created", "data"})
     )
 
     # test add_generation_prompt
@@ -361,7 +369,7 @@ async def test_chat_request(
     assert output.object == "list"
     assert len(output.data) == 1
     assert output.model == MODEL_NAME
-    assert output.usage.prompt_tokens == 34
+    assert output.usage.prompt_tokens == 33
 
     # test continue_final_message
     response = requests.post(
@@ -393,7 +401,7 @@ async def test_chat_request(
     assert output.object == "list"
     assert len(output.data) == 1
     assert output.model == MODEL_NAME
-    assert output.usage.prompt_tokens == 36
+    assert output.usage.prompt_tokens == 35
 
     # test continue_final_message with add_generation_prompt
     response = requests.post(
@@ -535,7 +543,7 @@ async def test_base64_embed_dtype_and_endianness(
     )
     float_data = [d.embedding for d in responses_float.data]
 
-    for embed_dtype in EMBED_DTYPE_TO_TORCH_DTYPE:
+    for embed_dtype in EMBED_DTYPES:
         for endianness in ENDIANNESS:
             responses_base64 = requests.post(
                 server.url_for("/v1/embeddings"),
@@ -574,7 +582,7 @@ async def test_bytes_embed_dtype_and_endianness(
     )
     float_data = [d.embedding for d in responses_float.data]
 
-    for embed_dtype in list(EMBED_DTYPE_TO_TORCH_DTYPE.keys()):
+    for embed_dtype in EMBED_DTYPES:
         for endianness in ENDIANNESS:
             responses_bytes = requests.post(
                 server.url_for("/v1/embeddings"),
@@ -618,7 +626,7 @@ async def test_bytes_only_embed_dtype_and_endianness(
     float_data = [d.embedding for d in responses_float.data]
     embedding_size = len(float_data[0])
 
-    for embed_dtype in list(EMBED_DTYPE_TO_TORCH_DTYPE.keys()):
+    for embed_dtype in EMBED_DTYPES:
         for endianness in ENDIANNESS:
             responses_bytes = requests.post(
                 server.url_for("/v1/embeddings"),
@@ -675,13 +683,13 @@ async def test_params_not_supported(
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("model_name", [MODEL_NAME])
-async def test_normalize(server: RemoteOpenAIServer, model_name: str):
-    async def get_outputs(normalize):
+async def test_use_activation(server: RemoteOpenAIServer, model_name: str):
+    async def get_outputs(use_activation):
         request_args = {
             "model": MODEL_NAME,
             "input": input_text,
             "encoding_format": "float",
-            "normalize": normalize,
+            "use_activation": use_activation,
         }
 
         response = requests.post(server.url_for("v1/embeddings"), json=request_args)
@@ -689,9 +697,9 @@ async def test_normalize(server: RemoteOpenAIServer, model_name: str):
 
         return torch.tensor([x["embedding"] for x in outputs["data"]])
 
-    default = await get_outputs(normalize=None)
-    w_normal = await get_outputs(normalize=True)
-    wo_normal = await get_outputs(normalize=False)
+    default = await get_outputs(use_activation=None)
+    w_normal = await get_outputs(use_activation=True)
+    wo_normal = await get_outputs(use_activation=False)
 
     assert torch.allclose(default, w_normal, atol=1e-2), "Default should use normal."
     assert not torch.allclose(w_normal, wo_normal, atol=1e-2), (
@@ -724,28 +732,9 @@ async def test_pooling_embed(server: RemoteOpenAIServer, model_name: str):
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("model_name", [MODEL_NAME])
-async def test_pooling_token_embed(server: RemoteOpenAIServer, model_name: str):
-    task = "token_embed"
-    response = requests.post(
-        server.url_for("pooling"),
-        json={
-            "model": model_name,
-            "input": input_text,
-            "encoding_format": "float",
-            "task": task,
-        },
-    )
-
-    poolings = PoolingResponse.model_validate(response.json())
-
-    assert len(poolings.data) == 1
-    assert len(poolings.data[0].data) == len(input_tokens)
-    assert len(poolings.data[0].data[0]) == 384
-
-
-@pytest.mark.asyncio
-@pytest.mark.parametrize("model_name", [MODEL_NAME])
-@pytest.mark.parametrize("task", ["classify", "token_classify", "plugin"])
+@pytest.mark.parametrize(
+    "task", ["classify", "token_classify", "token_embed", "plugin"]
+)
 async def test_pooling_not_supported(
     server: RemoteOpenAIServer, model_name: str, task: str
 ):
@@ -759,6 +748,10 @@ async def test_pooling_not_supported(
         },
     )
     assert response.json()["error"]["type"] == "BadRequestError"
-    assert response.json()["error"]["message"].startswith(
-        f"Task {task} is not supported"
-    )
+    if task == "plugin":
+        err_msg = "No IOProcessor plugin installed."
+    elif task == "token_embed":
+        err_msg = "Try switching the model's pooling_task via"
+    else:
+        err_msg = f"Unsupported task: {task!r}"
+    assert response.json()["error"]["message"].startswith(err_msg)

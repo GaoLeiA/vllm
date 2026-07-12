@@ -32,12 +32,12 @@ from vllm.multimodal.inputs import (
 from vllm.multimodal.processing import PromptInsertion
 from vllm.utils.mem_constants import GiB_bytes, MiB_bytes
 
+from ..utils import create_new_process_for_each_test
+
 pytestmark = pytest.mark.cpu_test
 
 
 def _dummy_elem(
-    modality: str,
-    key: str,
     size: int,
     *,
     rng: np.random.RandomState | None = None,
@@ -48,21 +48,18 @@ def _dummy_elem(
         data = torch.from_numpy(rng.randint(4, size=(size,), dtype=np.int8))
 
     return MultiModalFieldElem(
-        modality=modality,
-        key=key,
         data=data,
         field=MultiModalSharedField(batch_size=1),
     )
 
 
 def _dummy_item(
-    modality: str,
     size_by_key: dict[str, int],
     *,
     rng: np.random.RandomState | None = None,
 ):
-    return MultiModalKwargsItem.from_elems(
-        [_dummy_elem(modality, key, size, rng=rng) for key, size in size_by_key.items()]
+    return MultiModalKwargsItem(
+        {key: _dummy_elem(size, rng=rng) for key, size in size_by_key.items()}
     )
 
 
@@ -71,19 +68,19 @@ def _dummy_items(
     *,
     rng: np.random.RandomState | None = None,
 ):
-    return MultiModalKwargsItems.from_seq(
-        [
-            _dummy_item(modality, size_by_key, rng=rng)
+    return MultiModalKwargsItems(
+        {
+            modality: [_dummy_item(size_by_key, rng=rng)]
             for modality, size_by_key in size_by_key_modality.items()
-        ]
+        }
     )
 
 
 @pytest.mark.parametrize(
     ("item", "expected_size"),
     [
-        (_dummy_item("a", {"a1": 100}), 100),
-        (_dummy_item("a", {"a1": 100, "a2": 110}), 210),
+        (_dummy_item({"a1": 100}), 100),
+        (_dummy_item({"a1": 100, "a2": 110}), 210),
         (_dummy_items({"a": {"a1": 100, "a2": 110}, "b": {"b1": 120, "b2": 130}}), 460),  # noqa: E501
     ],
 )
@@ -143,7 +140,7 @@ def _compare_caches(
 
     rng = np.random.RandomState(seed)
     all_items = [
-        _dummy_item("item", {"key": item_size_gb}, rng=rng)
+        _dummy_item({"key": item_size_gb}, rng=rng)
         for _ in range(int(item_capacity / hit_rate))
     ]
     all_hashes = [
@@ -245,13 +242,13 @@ def _run_test_cache_eviction_lru(
         "image_C",
     ]
     request1_items = {
-        h: MultiModalKwargsItem.dummy(h, nbytes=2 * base_item_size)
+        h: MultiModalKwargsItem.dummy(nbytes=2 * base_item_size)
         for h in request1_hashes
     }
 
     request2_hashes = ["image_D", "image_E", "image_A", "image_C"]
     request2_items = {
-        h: MultiModalKwargsItem.dummy(h, nbytes=1 * base_item_size)
+        h: MultiModalKwargsItem.dummy(nbytes=1 * base_item_size)
         for h in request2_hashes
     }
 
@@ -356,15 +353,14 @@ def _run_test_cache_eviction_shm(
 ):
     request1_hashes = ["image_A", "image_B", "image_C"]
     request1_items = {
-        h: MultiModalKwargsItem.dummy(h, nbytes=5 * base_item_size)
-        for h in request1_hashes
+        h: MultiModalKwargsItem.dummy(5 * base_item_size) for h in request1_hashes
     }
     request1_items_p0_result = []
 
     request2_hashes = ["image_G", "image_A"]
     request2_items = {
         h: MultiModalKwargsItem.dummy(
-            h, nbytes=(5 if h in request1_hashes else 2) * base_item_size
+            (5 if h in request1_hashes else 2) * base_item_size
         )
         for h in request2_hashes
     }
@@ -373,7 +369,7 @@ def _run_test_cache_eviction_shm(
     request3_hashes = ["image_G", "image_H", "image_I", "image_B"]
     request3_items = {
         h: MultiModalKwargsItem.dummy(
-            h, nbytes=(5 if h in request1_hashes else 2) * base_item_size
+            (5 if h in request1_hashes else 2) * base_item_size
         )
         for h in request3_hashes
     }
@@ -532,7 +528,7 @@ def test_processor_cache_shared_across_loras():
     lora_a_identifier = f"12345:{base_mm_hash}"
     lora_b_identifier = f"67890:{base_mm_hash}"
 
-    item_data = MultiModalKwargsItem.dummy("test_image", nbytes=1024)
+    item_data = MultiModalKwargsItem.dummy(1024)
 
     feature_lora_a = MultiModalFeatureSpec(
         data=item_data,
@@ -555,3 +551,43 @@ def test_processor_cache_shared_across_loras():
 
     receiver_cache.get_and_update_features([feature_lora_b])
     assert feature_lora_b.data == item_data
+
+
+_SLEEP_VISION_PROMPT = (
+    "<|im_start|>system\nYou are a helpful assistant.<|im_end|>"
+    "\n<|im_start|>user\n<|vision_start|><|image_pad|><|vision_end|>"
+    "What is in the image?<|im_end|>\n"
+    "<|im_start|>assistant\n"
+)
+
+
+@create_new_process_for_each_test()
+@pytest.mark.skipif(
+    not torch.cuda.is_available(),
+    reason="sleep mode regression requires a CUDA GPU",
+)
+def test_sleep_wake_preserves_mm_cache_consistency():
+    """Regression for vllm-project/vllm#42995."""
+    from vllm import LLM, SamplingParams
+    from vllm.assets.image import ImageAsset
+
+    image = ImageAsset("stop_sign").pil_image
+    prompt = {
+        "prompt": _SLEEP_VISION_PROMPT,
+        "multi_modal_data": {"image": image},
+    }
+    sampling_params = SamplingParams(temperature=0, max_tokens=8)
+
+    llm = LLM(
+        model="Qwen/Qwen2-VL-2B-Instruct",
+        enable_sleep_mode=True,
+        enforce_eager=True,
+        gpu_memory_utilization=0.5,
+        max_model_len=2048,
+    )
+
+    llm.generate([prompt], sampling_params)
+    llm.sleep(level=1)
+    llm.wake_up()
+    output2 = llm.generate([prompt], sampling_params)
+    assert output2[0].outputs[0].text

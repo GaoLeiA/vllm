@@ -128,12 +128,10 @@ def test_empty_input_error(server: RemoteOpenAIServer, model_name: str):
         server.url_for("classify"),
         json={"model": model_name, "input": []},
     )
-    classification_response.raise_for_status()
-    output = ClassificationResponse.model_validate(classification_response.json())
 
-    assert output.object == "list"
-    assert isinstance(output.data, list)
-    assert len(output.data) == 0
+    error = classification_response.json()
+    assert classification_response.status_code == 400
+    assert "error" in error
 
 
 @pytest.mark.parametrize("model_name", [MODEL_NAME])
@@ -392,7 +390,7 @@ async def test_use_activation(server: RemoteOpenAIServer, model_name: str):
 @pytest.mark.asyncio
 @pytest.mark.parametrize("model_name", [MODEL_NAME])
 async def test_score(server: RemoteOpenAIServer, model_name: str):
-    # score api is only enabled for num_labels == 1.
+    # Scoring API is only enabled for num_labels == 1.
     response = requests.post(
         server.url_for("score"),
         json={
@@ -401,13 +399,13 @@ async def test_score(server: RemoteOpenAIServer, model_name: str):
             "documents": "pong",
         },
     )
-    assert response.json()["error"]["type"] == "BadRequestError"
+    assert response.json()["detail"] == "Not Found"
 
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("model_name", [MODEL_NAME])
 async def test_rerank(server: RemoteOpenAIServer, model_name: str):
-    # rerank api is only enabled for num_labels == 1.
+    # Scoring API is only enabled for num_labels == 1.
     response = requests.post(
         server.url_for("rerank"),
         json={
@@ -416,7 +414,7 @@ async def test_rerank(server: RemoteOpenAIServer, model_name: str):
             "documents": ["pong"],
         },
     )
-    assert response.json()["error"]["type"] == "BadRequestError"
+    assert response.json()["detail"] == "Not Found"
 
 
 @pytest.mark.asyncio
@@ -438,26 +436,7 @@ async def test_pooling_classify(server: RemoteOpenAIServer, model_name: str):
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("model_name", [MODEL_NAME])
-async def test_pooling_token_classify(server: RemoteOpenAIServer, model_name: str):
-    task = "token_classify"
-    response = requests.post(
-        server.url_for("pooling"),
-        json={
-            "model": model_name,
-            "input": input_text,
-            "encoding_format": "float",
-            "task": task,
-        },
-    )
-    poolings = PoolingResponse.model_validate(response.json())
-    assert len(poolings.data) == 1
-    assert len(poolings.data[0].data) == 8
-    assert len(poolings.data[0].data[0]) == 2
-
-
-@pytest.mark.asyncio
-@pytest.mark.parametrize("model_name", [MODEL_NAME])
-@pytest.mark.parametrize("task", ["embed", "token_embed", "plugin"])
+@pytest.mark.parametrize("task", ["embed", "token_embed", "token_classify", "plugin"])
 async def test_pooling_not_supported(
     server: RemoteOpenAIServer, model_name: str, task: str
 ):
@@ -471,6 +450,11 @@ async def test_pooling_not_supported(
         },
     )
     assert response.json()["error"]["type"] == "BadRequestError"
-    assert response.json()["error"]["message"].startswith(
-        f"Task {task} is not supported"
-    )
+
+    if task == "plugin":
+        err_msg = "No IOProcessor plugin installed."
+    elif task == "token_classify":
+        err_msg = "Try switching the model's pooling_task via"
+    else:
+        err_msg = f"Unsupported task: {task!r}"
+    assert response.json()["error"]["message"].startswith(err_msg)

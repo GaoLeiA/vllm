@@ -22,14 +22,9 @@ class XpuCommunicator(DeviceCommunicatorBase):
         unique_name: str = "",
     ):
         super().__init__(cpu_group, device, device_group, unique_name)
+        self.ca_comm: None = None
         if self.use_all2all:
-            if self.all2all_backend == "naive":
-                from .all2all import NaiveAll2AllManager
-
-                self.all2all_manager = NaiveAll2AllManager(self.cpu_group)
-                logger.info("Using naive all2all manager.")
-
-            elif self.all2all_backend == "allgather_reducescatter":
+            if self.all2all_backend in ("naive", "allgather_reducescatter"):
                 from .all2all import AgRsAll2AllManager
 
                 self.all2all_manager = AgRsAll2AllManager(self.cpu_group)
@@ -47,9 +42,10 @@ class XpuCommunicator(DeviceCommunicatorBase):
                 self.all2all_manager = AgRsAll2AllManager(self.cpu_group)
                 logger.info("Using AgRs manager on XPU device.")
 
-    def all_reduce(self, input_) -> torch.Tensor:
-        dist.all_reduce(input_, group=self.device_group)
-        return input_
+    def all_reduce(self, input_: torch.Tensor) -> torch.Tensor:
+        output = input_.clone()
+        dist.all_reduce(output, group=self.device_group)
+        return output
 
     def reduce_scatter(self, input_: torch.Tensor, dim: int = -1):
         world_size = self.world_size
@@ -70,7 +66,7 @@ class XpuCommunicator(DeviceCommunicatorBase):
             output_shape, dtype=input_tensor.dtype, device=input_tensor.device
         )
 
-        dist.reduce_scatter_tensor(output, input_tensor)
+        dist.reduce_scatter_tensor(output, input_tensor, group=self.device_group)
 
         # Reshape before returning
         return output.movedim(0, dim).contiguous()
@@ -103,9 +99,9 @@ class XpuCommunicator(DeviceCommunicatorBase):
         if sizes is not None and sizes.count(sizes[0]) != len(sizes):
             # if inputs shape in different ranks is not the same using reduce_scatter
             input_splits = list(input_tensor.split(sizes, dim=0))
-            dist.reduce_scatter(output, input_splits)
+            dist.reduce_scatter(output, input_splits, group=self.device_group)
         else:
-            dist.reduce_scatter_tensor(output, input_tensor)
+            dist.reduce_scatter_tensor(output, input_tensor, group=self.device_group)
         # Reshape before returning
         return output.movedim(0, dim).contiguous()
 
@@ -149,10 +145,10 @@ class XpuCommunicator(DeviceCommunicatorBase):
                             device=input_.device,
                         )
                     )
-                dist.all_gather(all_gather_list, input_)
+                dist.all_gather(all_gather_list, input_, group=self.device_group)
                 output_tensor = torch.cat(all_gather_list, dim=0)
             else:
-                dist.all_gather([output_tensor], input_)
+                dist.all_gather([output_tensor], input_, group=self.device_group)
             return output_tensor
 
         if isinstance(input_, torch.Tensor):
@@ -196,26 +192,62 @@ class XpuCommunicator(DeviceCommunicatorBase):
     def broadcast(self, input_: torch.Tensor, src: int = 0) -> None:
         dist.broadcast(input_, src=src, group=self.device_group)
 
-    def dispatch(
+    def dispatch_router_logits(
         self,
         hidden_states: torch.Tensor,
         router_logits: torch.Tensor,
         is_sequence_parallel: bool = False,
         extra_tensors: list[torch.Tensor] | None = None,
-    ) -> tuple[torch.Tensor, torch.Tensor]:
+    ) -> (
+        tuple[torch.Tensor, torch.Tensor]
+        | tuple[torch.Tensor, torch.Tensor, list[torch.Tensor]]
+    ):
+        """
+        Dispatch the hidden states and router logits to the appropriate device.
+        This is a no-op in the base class.
+        """
+
         assert self.all2all_manager is not None
-        return self.all2all_manager.dispatch(
+        return self.all2all_manager.dispatch_router_logits(
             hidden_states,
             router_logits,
             is_sequence_parallel,
-            extra_tensors,  # type: ignore[call-arg]
+            extra_tensors,
+        )
+
+    def dispatch(
+        self,
+        hidden_states: torch.Tensor,
+        topk_weights: torch.Tensor,
+        topk_ids: torch.Tensor,
+        is_sequence_parallel: bool = False,
+        extra_tensors: list[torch.Tensor] | None = None,
+    ) -> (
+        tuple[torch.Tensor, torch.Tensor, torch.Tensor]
+        | tuple[torch.Tensor, torch.Tensor, torch.Tensor, list[torch.Tensor]]
+    ):
+        """
+        Dispatch the hidden states and topk weights/ids to the appropriate device.
+        This is a no-op in the base class.
+        """
+        assert self.all2all_manager is not None
+        return self.all2all_manager.dispatch(
+            hidden_states,
+            topk_weights,
+            topk_ids,
+            is_sequence_parallel,
+            extra_tensors=extra_tensors,
         )
 
     def combine(
         self, hidden_states: torch.Tensor, is_sequence_parallel: bool = False
     ) -> torch.Tensor:
+        """
+        Combine the hidden states and router logits from the appropriate device.
+        This is a no-op in the base class.
+        """
         assert self.all2all_manager is not None
-        hidden_states = self.all2all_manager.combine(
-            hidden_states, is_sequence_parallel
+        return self.all2all_manager.combine(
+            hidden_states,
+            is_sequence_parallel,
         )
-        return hidden_states

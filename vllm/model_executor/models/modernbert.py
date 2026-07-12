@@ -10,7 +10,7 @@ from transformers.activations import ACT2FN
 from vllm.compilation.decorators import support_torch_compile
 from vllm.config import ModelConfig, VllmConfig
 from vllm.distributed import get_tensor_model_parallel_world_size
-from vllm.model_executor.layers.attention.encoder_only_attention import (
+from vllm.model_executor.layers.attention import (
     EncoderOnlyAttention,
 )
 from vllm.model_executor.layers.linear import QKVParallelLinear, RowParallelLinear
@@ -54,17 +54,20 @@ class ModernBertEmbeddings(nn.Module):
         input_ids: torch.Tensor,
         inputs_embeds: torch.Tensor | None = None,
     ) -> torch.Tensor:
-        if inputs_embeds is not None:
-            return self.norm(inputs_embeds)
-        else:
+        if inputs_embeds is None:
             inputs_embeds = self.tok_embeddings(input_ids)
-            embeddings = self.norm(inputs_embeds)
-            return embeddings
+
+        embeddings = self.norm(inputs_embeds)
+        return embeddings
 
 
 class ModernBertAttention(nn.Module):
     def __init__(
-        self, config: ModernBertConfig, layer_id: int | None = None, prefix: str = ""
+        self,
+        config: ModernBertConfig,
+        layer_id: int | None = None,
+        prefix: str = "",
+        dtype: torch.dtype | None = None,
     ):
         super().__init__()
         self.config = config
@@ -91,11 +94,13 @@ class ModernBertAttention(nn.Module):
             rope_parameters = config.rope_parameters[layer_type]
             sliding_window: int | None = None
             if layer_type == "sliding_attention":
-                sliding_window = config.local_attention // 2
+                # Treats the local attention boundary as inclusive
+                sliding_window = config.sliding_window + 1
         else:
             # Transformers v4
             sliding_window = None
             if layer_id % config.global_attn_every_n_layers != 0:
+                # ModernBertConfig does not expose sliding_window
                 sliding_window = config.local_attention // 2
                 rope_theta = (
                     config.local_rope_theta
@@ -110,7 +115,7 @@ class ModernBertAttention(nn.Module):
             head_size=self.head_dim,
             max_position=config.max_position_embeddings,
             rope_parameters=rope_parameters,
-            dtype=torch.float16,
+            dtype=dtype,
         )
         self.attn = EncoderOnlyAttention(
             self.num_heads,
@@ -147,7 +152,7 @@ class ModernBertMLP(nn.Module):
         self.Wi = nn.Linear(
             config.hidden_size, int(config.intermediate_size) * 2, bias=config.mlp_bias
         )
-        self.act = nn.GELU()
+        self.act = ACT2FN[config.hidden_activation]
         self.Wo = RowParallelLinear(
             config.intermediate_size,
             config.hidden_size,
@@ -162,7 +167,11 @@ class ModernBertMLP(nn.Module):
 
 class ModernBertLayer(nn.Module):
     def __init__(
-        self, config: ModernBertConfig, prefix: str = "", layer_id: int | None = None
+        self,
+        config: ModernBertConfig,
+        prefix: str = "",
+        layer_id: int | None = None,
+        dtype: torch.dtype | None = None,
     ):
         super().__init__()
         self.config = config
@@ -173,7 +182,10 @@ class ModernBertLayer(nn.Module):
                 config.hidden_size, eps=config.norm_eps, bias=config.norm_bias
             )
         self.attn = ModernBertAttention(
-            config=config, layer_id=layer_id, prefix=f"{prefix}.attn"
+            config=config,
+            layer_id=layer_id,
+            prefix=f"{prefix}.attn",
+            dtype=dtype,
         )
         self.mlp_norm = nn.LayerNorm(
             config.hidden_size, eps=config.norm_eps, bias=config.norm_bias
@@ -198,12 +210,14 @@ class ModernBertEncoderLayer(nn.Module):
     def __init__(self, vllm_config: VllmConfig, prefix: str = ""):
         super().__init__()
         config = vllm_config.model_config.hf_config
+        dtype = vllm_config.model_config.dtype
         self.layers = nn.ModuleList(
             [
                 ModernBertLayer(
                     config=config,
                     layer_id=layer_id,
                     prefix=f"{prefix}.layers.{layer_id}",
+                    dtype=dtype,
                 )
                 for layer_id in range(config.num_hidden_layers)
             ]
@@ -223,7 +237,11 @@ class ModernBertEncoderLayer(nn.Module):
 @default_pooling_type(seq_pooling_type="CLS")
 class ModernBertModel(nn.Module):
     hf_to_vllm_mapper = WeightsMapper(
-        orig_to_new_prefix={"layers.": "encoder_layer.layers."}
+        orig_to_new_prefix={
+            "model.layers.": "encoder_layer.layers.",
+            "layers.": "encoder_layer.layers.",
+            "model.": "",
+        }
     )
 
     def __init__(
@@ -251,6 +269,8 @@ class ModernBertModel(nn.Module):
         loaded_params: set[str] = set()
         for name, loaded_weight in weights:
             if name.endswith(".bias") and name not in params_dict:
+                continue
+            if name not in params_dict:
                 continue
             param = params_dict[name]
             weight_loader = getattr(param, "weight_loader", default_weight_loader)

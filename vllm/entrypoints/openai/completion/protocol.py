@@ -5,47 +5,57 @@
 # https://github.com/lm-sys/FastChat/blob/168ccc29d3f7edc50823016105c024fe2282732a/fastchat/protocol/openai_api_protocol.py
 import json
 import time
-from dataclasses import replace
 from typing import Annotated, Any, Literal
 
-import torch
-from pydantic import (
-    Field,
-    model_validator,
-)
+from pydantic import Field, model_validator
 
+import vllm.envs as envs
+from vllm.config import ModelConfig
+from vllm.config.utils import replace
 from vllm.entrypoints.openai.engine.protocol import (
     AnyResponseFormat,
     LegacyStructuralTagResponseFormat,
-    LogitsProcessors,
     OpenAIBaseModel,
+    PerRequestTimingMetrics,
     StreamOptions,
     StructuralTagResponseFormat,
     UsageInfo,
-    get_logits_processors,
+    validate_structural_tag_response_format,
+    validate_structured_outputs_structural_tag,
 )
 from vllm.exceptions import VLLMValidationError
 from vllm.logger import init_logger
 from vllm.logprobs import Logprob
+from vllm.renderers import TokenizeParams
 from vllm.sampling_params import (
     BeamSearchParams,
+    RepetitionDetectionParams,
     RequestOutputKind,
     SamplingParams,
     StructuredOutputsParams,
+    ThinkingTokenBudget,
 )
 from vllm.utils import random_uuid
+from vllm.utils.collection_utils import is_list_of
 
 logger = init_logger(__name__)
 
 
-_LONG_INFO = torch.iinfo(torch.long)
+_INT64_MIN = -(2**63)
+_INT64_MAX = 2**63 - 1
 
 
 class CompletionRequest(OpenAIBaseModel):
     # Ordered by official OpenAI API documentation
     # https://platform.openai.com/docs/api-reference/completions/create
     model: str | None = None
-    prompt: list[int] | list[list[int]] | str | list[str] | None = None
+    prompt: (
+        list[Annotated[int, Field(ge=0)]]
+        | list[list[Annotated[int, Field(ge=0)]]]
+        | str
+        | list[str]
+        | None
+    ) = None
     echo: bool | None = False
     frequency_penalty: float | None = 0.0
     logit_bias: dict[str, float] | None = None
@@ -53,7 +63,7 @@ class CompletionRequest(OpenAIBaseModel):
     max_tokens: int | None = 16
     n: int = 1
     presence_penalty: float | None = 0.0
-    seed: int | None = Field(None, ge=_LONG_INFO.min, le=_LONG_INFO.max)
+    seed: int | None = Field(None, ge=_INT64_MIN, le=_INT64_MAX)
     stop: str | list[str] | None = []
     stream: bool | None = False
     stream_options: StreamOptions | None = None
@@ -74,11 +84,18 @@ class CompletionRequest(OpenAIBaseModel):
     min_tokens: int = 0
     skip_special_tokens: bool = True
     spaces_between_special_tokens: bool = True
-    truncate_prompt_tokens: Annotated[int, Field(ge=-1, le=_LONG_INFO.max)] | None = (
-        None
+    truncate_prompt_tokens: Annotated[int, Field(ge=-1, le=_INT64_MAX)] | None = None
+    truncation_side: Literal["left", "right"] | None = Field(
+        default=None,
+        description=(
+            "Which side to truncate from when truncate_prompt_tokens is active. "
+            "'right' keeps the first N tokens. "
+            "'left' keeps the last N tokens."
+        ),
     )
     allowed_token_ids: list[int] | None = None
     prompt_logprobs: int | None = None
+    bad_words: list[str] = Field(default_factory=list)
     # --8<-- [end:completion-sampling-params]
 
     # --8<-- [start:completion-extra-params]
@@ -104,6 +121,8 @@ class CompletionRequest(OpenAIBaseModel):
     )
     priority: int = Field(
         default=0,
+        ge=_INT64_MIN,
+        le=_INT64_MAX,
         description=(
             "The priority of the request (lower means earlier handling; "
             "default: 0). Any priority other than 0 will raise an error "
@@ -116,19 +135,6 @@ class CompletionRequest(OpenAIBaseModel):
             "The request_id related to this request. If the caller does "
             "not set it, a random_uuid will be generated. This id is used "
             "through out the inference process and return in response."
-        ),
-    )
-    logits_processors: LogitsProcessors | None = Field(
-        default=None,
-        description=(
-            "A list of either qualified names of logits processors, or "
-            "constructor objects, to apply when sampling. A constructor is "
-            "a JSON object with a required 'qualname' field specifying the "
-            "qualified name of the processor class/factory, and optional "
-            "'args' and 'kwargs' fields containing positional and keyword "
-            "arguments. For example: {'qualname': "
-            "'my_module.MyLogitsProcessor', 'args': [1, 2], 'kwargs': "
-            "{'param': 'value'}}."
         ),
     )
 
@@ -148,6 +154,21 @@ class CompletionRequest(OpenAIBaseModel):
             "only in the first chunk, and token_ids contains the delta tokens "
             "for each chunk. This is useful for debugging or when you "
             "need to map generated text back to input tokens."
+        ),
+    )
+    return_token_offsets: bool | None = Field(
+        default=False,
+        description=(
+            "If true, return char-level (start, end) offsets for each "
+            "token relative to the tokenized source string in the "
+            "`token_offsets` field of the rendered response. Only "
+            "supported on the `/v1/completions/render` and "
+            "`/v1/chat/completions/render` endpoints; ignored on regular "
+            "generation endpoints. Honored only for Fast (Rust-backed) "
+            "tokenizers; otherwise `token_offsets` is null. For chat "
+            "requests, offsets are relative to the templated prompt "
+            "string (after applying the chat template). Multimodal "
+            "inputs and pre-tokenized inputs always yield null."
         ),
     )
 
@@ -176,7 +197,39 @@ class CompletionRequest(OpenAIBaseModel):
         ),
     )
 
+    repetition_detection: RepetitionDetectionParams | None = Field(
+        default=None,
+        description="Parameters for detecting repetitive N-gram patterns "
+        "in output tokens. If such repetition is detected, generation will "
+        "be ended early. LLMs can sometimes generate repetitive, unhelpful "
+        "token patterns, stopping only when they hit the maximum output length "
+        "(e.g. 'abcdabcdabcd...' or '\\emoji \\emoji \\emoji ...'). This feature "
+        "can detect such behavior and terminate early, saving time and tokens.",
+    )
+
+    thinking_token_budget: ThinkingTokenBudget = Field(
+        default=None,
+        description=(
+            "Maximum number of tokens allowed for thinking operations "
+            "(reasoning models). Non-negative integer sets the limit; "
+            "-1 means unlimited (treated as unset)."
+        ),
+    )
+
     # --8<-- [end:completion-extra-params]
+
+    def build_tok_params(self, model_config: ModelConfig) -> TokenizeParams:
+        return TokenizeParams(
+            max_total_tokens=model_config.max_model_len,
+            max_output_tokens=self.max_tokens or 0,
+            truncate_prompt_tokens=self.truncate_prompt_tokens,
+            truncation_side=self.truncation_side,
+            add_special_tokens=self.add_special_tokens,
+            needs_detokenization=bool(self.echo and not self.return_token_ids),
+            max_total_tokens_param="max_model_len",
+            max_output_tokens_param="max_tokens",
+            return_token_offsets=bool(self.return_token_offsets),
+        )
 
     # Default sampling parameters for completion requests
     _DEFAULT_SAMPLING_PARAMS: dict = {
@@ -211,7 +264,6 @@ class CompletionRequest(OpenAIBaseModel):
     def to_sampling_params(
         self,
         max_tokens: int,
-        logits_processor_pattern: str | None,
         default_sampling_params: dict | None = None,
     ) -> SamplingParams:
         if default_sampling_params is None:
@@ -240,6 +292,18 @@ class CompletionRequest(OpenAIBaseModel):
                 "min_p", self._DEFAULT_SAMPLING_PARAMS["min_p"]
             )
 
+        # Merge server-default stop_token_ids (e.g., model-specific tokens
+        # like </call> for gpt-oss) with any request-specified ones
+        stop_token_ids = self.stop_token_ids
+        default_stop_ids = default_sampling_params.get("stop_token_ids")
+        if default_stop_ids:
+            if not stop_token_ids:
+                stop_token_ids = list(default_stop_ids)
+            else:
+                stop_token_ids = list(
+                    dict.fromkeys([*stop_token_ids, *default_stop_ids])
+                )
+
         prompt_logprobs = self.prompt_logprobs
         if prompt_logprobs is None and self.echo:
             prompt_logprobs = self.logprobs
@@ -259,7 +323,7 @@ class CompletionRequest(OpenAIBaseModel):
                 structured_outputs_kwargs["json"] = json_schema.json_schema
             elif response_format.type == "structural_tag":
                 structural_tag = response_format
-                assert structural_tag is not None and isinstance(
+                assert isinstance(
                     structural_tag,
                     (
                         LegacyStructuralTagResponseFormat,
@@ -293,7 +357,7 @@ class CompletionRequest(OpenAIBaseModel):
             min_p=min_p,
             seed=self.seed,
             stop=self.stop,
-            stop_token_ids=self.stop_token_ids,
+            stop_token_ids=stop_token_ids,
             logprobs=self.logprobs,
             ignore_eos=self.ignore_eos,
             max_tokens=max_tokens if not echo_without_generation else 1,
@@ -302,19 +366,57 @@ class CompletionRequest(OpenAIBaseModel):
             skip_special_tokens=self.skip_special_tokens,
             spaces_between_special_tokens=self.spaces_between_special_tokens,
             include_stop_str_in_output=self.include_stop_str_in_output,
-            logits_processors=get_logits_processors(
-                self.logits_processors, logits_processor_pattern
-            ),
-            truncate_prompt_tokens=self.truncate_prompt_tokens,
             output_kind=RequestOutputKind.DELTA
             if self.stream
             else RequestOutputKind.FINAL_ONLY,
             structured_outputs=self.structured_outputs,
             logit_bias=self.logit_bias,
             allowed_token_ids=self.allowed_token_ids,
+            bad_words=self.bad_words,
             extra_args=extra_args or None,
             skip_clone=True,  # Created fresh per request, safe to skip clone
+            repetition_detection=self.repetition_detection,
+            thinking_token_budget=self.thinking_token_budget,
         )
+
+    @model_validator(mode="before")
+    @classmethod
+    def normalize_null_max_tokens(cls, data):
+        if isinstance(data, dict) and data.get("max_tokens") is None:
+            data = data.copy()
+            data["max_tokens"] = cls.model_fields["max_tokens"].default
+        return data
+
+    @model_validator(mode="before")
+    @classmethod
+    def validate_response_format(cls, data):
+        response_format = data.get("response_format")
+        if response_format is None:
+            return data
+
+        rf_type = (
+            response_format.get("type")
+            if isinstance(response_format, dict)
+            else getattr(response_format, "type", None)
+        )
+
+        if rf_type == "json_schema":
+            json_schema = (
+                response_format.get("json_schema")
+                if isinstance(response_format, dict)
+                else getattr(response_format, "json_schema", None)
+            )
+            if json_schema is None:
+                raise VLLMValidationError(
+                    "When response_format type is 'json_schema', the "
+                    "'json_schema' field must be provided.",
+                    parameter="response_format",
+                )
+
+        if rf_type == "structural_tag":
+            validate_structural_tag_response_format(response_format)
+
+        return data
 
     @model_validator(mode="before")
     @classmethod
@@ -323,8 +425,16 @@ class CompletionRequest(OpenAIBaseModel):
             return data
 
         structured_outputs_kwargs = data["structured_outputs"]
+        # structured_outputs may arrive as a dict (from JSON/raw kwargs) or
+        # as a StructuredOutputsParams dataclass instance.
+        is_dataclass = isinstance(structured_outputs_kwargs, StructuredOutputsParams)
         count = sum(
-            structured_outputs_kwargs.get(k) is not None
+            (
+                getattr(structured_outputs_kwargs, k, None)
+                if is_dataclass
+                else structured_outputs_kwargs.get(k)
+            )
+            is not None
             for k in ("json", "regex", "choice")
         )
         if count > 1:
@@ -333,6 +443,7 @@ class CompletionRequest(OpenAIBaseModel):
                 "outputs ('json', 'regex' or 'choice').",
                 parameter="structured_outputs",
             )
+        validate_structured_outputs_structural_tag(structured_outputs_kwargs)
         return data
 
     @model_validator(mode="before")
@@ -383,8 +494,41 @@ class CompletionRequest(OpenAIBaseModel):
         )
 
         if prompt_is_empty and embeds_is_empty:
-            raise ValueError(
-                "Either prompt or prompt_embeds must be provided and non-empty."
+            raise VLLMValidationError(
+                "Either prompt or prompt_embeds must be provided and non-empty.",
+                parameter="prompt",
+            )
+
+        return data
+
+    @model_validator(mode="before")
+    @classmethod
+    def validate_prompt_list_length(cls, data):
+        max_prompts = envs.VLLM_MAX_COMPLETION_PROMPTS
+
+        prompt = data.get("prompt")
+        if (
+            isinstance(prompt, list)
+            and len(prompt) > 0
+            and not is_list_of(prompt, int)
+            and len(prompt) > max_prompts
+        ):
+            raise VLLMValidationError(
+                f"prompt list length {len(prompt)} exceeds the maximum "
+                f"allowed count of {max_prompts}. To increase this "
+                "limit, set the VLLM_MAX_COMPLETION_PROMPTS "
+                "environment variable.",
+                parameter="prompt",
+            )
+
+        prompt_embeds = data.get("prompt_embeds")
+        if isinstance(prompt_embeds, list) and len(prompt_embeds) > max_prompts:
+            raise VLLMValidationError(
+                f"prompt_embeds list length {len(prompt_embeds)} exceeds "
+                f"the maximum allowed count of {max_prompts}. To increase "
+                "this limit, set the VLLM_MAX_COMPLETION_PROMPTS "
+                "environment variable.",
+                parameter="prompt_embeds",
             )
 
         return data
@@ -395,8 +539,9 @@ class CompletionRequest(OpenAIBaseModel):
         if data.get("cache_salt") is not None and (
             not isinstance(data["cache_salt"], str) or not data["cache_salt"]
         ):
-            raise ValueError(
-                "Parameter 'cache_salt' must be a non-empty string if provided."
+            raise VLLMValidationError(
+                "Parameter 'cache_salt' must be a non-empty string if provided.",
+                parameter="cache_salt",
             )
         return data
 
@@ -424,6 +569,16 @@ class CompletionResponseChoice(OpenAIBaseModel):
     token_ids: list[int] | None = None  # For response
     prompt_logprobs: list[dict[int, Logprob] | None] | None = None
     prompt_token_ids: list[int] | None = None  # For prompt
+    # Per-token expert routing decisions, base64-encoded ``.npy`` bytes
+    # (numpy serialization). Shape after decode:
+    #   (num_tokens - 1, num_layers, num_experts_per_tok)  dtype uint8/uint16
+    # ``num_tokens - 1`` because the last sampled token has not been
+    # forwarded yet and therefore has no routing data.
+    # Decode:
+    #   np.load(io.BytesIO(base64.b64decode(s)))
+    # ``None`` if (a) the request was aborted before any forward pass,
+    # or (b) ``enable_return_routed_experts`` is off server-side.
+    routed_experts: str | None = None
 
 
 class CompletionResponse(OpenAIBaseModel):
@@ -440,6 +595,7 @@ class CompletionResponse(OpenAIBaseModel):
     kv_transfer_params: dict[str, Any] | None = Field(
         default=None, description="KVTransfer parameters."
     )
+    metrics: PerRequestTimingMetrics | None = None
 
 
 class CompletionResponseStreamChoice(OpenAIBaseModel):
@@ -468,3 +624,7 @@ class CompletionStreamResponse(OpenAIBaseModel):
     model: str
     choices: list[CompletionResponseStreamChoice]
     usage: UsageInfo | None = Field(default=None)
+    # Set only on the final chunk of a stream to mirror non-streaming responses
+    # without the per-chunk serialization overhead.
+    system_fingerprint: str | None = None
+    metrics: PerRequestTimingMetrics | None = None

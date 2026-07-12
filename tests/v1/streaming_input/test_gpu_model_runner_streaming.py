@@ -35,11 +35,10 @@ def mock_model_runner_with_input_batch():
         max_model_len=1024,
         max_num_batched_tokens=1024,
         device="cpu",
-        pin_memory=False,
         vocab_size=32000,
         block_sizes=[16],
         kernel_block_sizes=[16],
-        is_spec_decode=False,
+        max_num_blocks_per_req=[64],
         logitsprocs=None,
         is_pooling_model=False,
     )
@@ -131,7 +130,7 @@ def test_e2e_streaming_with_multimodal_features(mock_model_runner_with_input_bat
 
     # Step 1: Create initial request state with one multimodal feature
     mm_feature_1 = MultiModalFeatureSpec(
-        data=MultiModalKwargsItem.dummy("audio"),
+        data=MultiModalKwargsItem.dummy(),
         modality="audio",
         identifier="audio_1",
         mm_position=PlaceholderRange(offset=2, length=10),
@@ -158,7 +157,7 @@ def test_e2e_streaming_with_multimodal_features(mock_model_runner_with_input_bat
     # The scheduler has already set prompt_token_ids to the full sequence
     # (original prompt + intermediate outputs + new prompt with new multimodal feature)
     mm_feature_2 = MultiModalFeatureSpec(
-        data=MultiModalKwargsItem.dummy("audio"),
+        data=MultiModalKwargsItem.dummy(),
         modality="audio",
         identifier="audio_2",
         mm_position=PlaceholderRange(offset=15, length=5),

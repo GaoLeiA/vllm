@@ -14,12 +14,12 @@ from transformers import (
     CLIPVisionConfig,
 )
 
-from vllm.attention.layer import Attention
 from vllm.config import VllmConfig
 from vllm.config.multimodal import BaseDummyOptions
 from vllm.distributed import divide, get_tensor_model_parallel_world_size
+from vllm.inputs import MultiModalDataDict, MultiModalInput
 from vllm.model_executor.layers.activation import get_act_fn
-from vllm.model_executor.layers.attention.mm_encoder_attention import MMEncoderAttention
+from vllm.model_executor.layers.attention import Attention, MMEncoderAttention
 from vllm.model_executor.layers.conv import Conv2dLayer
 from vllm.model_executor.layers.linear import (
     ColumnParallelLinear,
@@ -29,31 +29,33 @@ from vllm.model_executor.layers.linear import (
 from vllm.model_executor.layers.pooler import DispatchPooler
 from vllm.model_executor.layers.quantization import QuantizationConfig
 from vllm.model_executor.layers.vocab_parallel_embedding import VocabParallelEmbedding
-from vllm.model_executor.model_loader.weight_utils import default_weight_loader
 from vllm.model_executor.models.interfaces import SupportsQuant
 from vllm.multimodal import MULTIMODAL_REGISTRY
 from vllm.multimodal.inputs import (
-    MultiModalDataDict,
     MultiModalFieldConfig,
-    MultiModalInputs,
     MultiModalKwargsItems,
-    MultiModalUUIDDict,
 )
-from vllm.multimodal.parse import ImageProcessorItems, ImageSize, MultiModalDataItems
+from vllm.multimodal.parse import (
+    ImageProcessorItems,
+    ImageSize,
+    MultiModalDataItems,
+)
 from vllm.multimodal.processing import (
     BaseDummyInputsBuilder,
     BaseMultiModalProcessor,
     BaseProcessingInfo,
+    ProcessorInputs,
     PromptIndexTargets,
     PromptReplacement,
     PromptUpdate,
+    TimingContext,
 )
 from vllm.sequence import IntermediateTensors
 from vllm.utils.tensor_schema import TensorSchema, TensorShape
 
 from .interfaces import MultiModalEmbeddings, SupportsMultiModal
 from .interfaces_base import default_pooling_type
-from .utils import AutoWeightsLoader, maybe_prefix
+from .utils import AutoWeightsLoader, WeightsMapper, maybe_prefix
 from .vision import (
     VisionEncoderInfo,
     VisionFeatureSelectStrategy,
@@ -171,13 +173,13 @@ class CLIPDummyInputsBuilder(BaseDummyInputsBuilder[CLIPProcessingInfo]):
         self,
         seq_len: int,
         mm_counts: Mapping[str, int],
-        mm_options: Mapping[str, BaseDummyOptions] | None = None,
+        mm_options: Mapping[str, BaseDummyOptions],
     ) -> MultiModalDataDict:
         num_images = mm_counts.get("image", 0)
 
         target_width, target_height = self.info.get_image_size_with_most_features()
 
-        image_overrides = mm_options.get("image") if mm_options else None
+        image_overrides = mm_options.get("image")
 
         return {
             "image": self._get_dummy_images(
@@ -201,35 +203,34 @@ class CLIPMultiModalProcessor(BaseMultiModalProcessor[CLIPProcessingInfo]):
 
     def apply(
         self,
-        prompt: str | list[int],
-        mm_data: MultiModalDataDict,
-        hf_processor_mm_kwargs: Mapping[str, object],
-        tokenization_kwargs: Mapping[str, object] | None = None,
-        *,
-        mm_uuids: MultiModalUUIDDict | None = None,
-    ) -> MultiModalInputs:
-        if prompt and mm_data:
-            raise ValueError(
-                "CLIP accepts text-only or image-only inputs, not both! "
-                "Image-only inputs means passing an image with an empty text "
-                "prompt."
-            )
+        inputs: ProcessorInputs,
+        timing_ctx: TimingContext,
+    ) -> MultiModalInput:
+        if inputs.mm_data_items:
+            if isinstance(inputs.prompt, str):
+                if len(inputs.prompt) > 0:
+                    raise ValueError(
+                        "CLIP accepts text-only or image-only inputs, not both! "
+                        "You must pass an image with an empty text prompt."
+                    )
+            else:
+                special_tokens = self.info.get_tokenizer().all_special_ids
+                if all(tok in special_tokens for tok in inputs.prompt):
+                    inputs.prompt = []
+                else:
+                    raise ValueError(
+                        "CLIP accepts text-only or image-only inputs, not both! "
+                        "You must pass an image with an empty token prompt."
+                    )
 
-        if mm_data:
             # For multi-modal data, the prompt after processing should
             # only contain the dummy image tokens
-            tokenization_kwargs = {
-                **(tokenization_kwargs or {}),
+            inputs.tokenization_kwargs = {
+                **inputs.tokenization_kwargs,
                 "add_special_tokens": False,
             }
 
-        return super().apply(
-            prompt=prompt,
-            mm_data=mm_data,
-            hf_processor_mm_kwargs=hf_processor_mm_kwargs,
-            tokenization_kwargs=tokenization_kwargs,
-            mm_uuids=mm_uuids,
-        )
+        return super().apply(inputs, timing_ctx)
 
     def _hf_processor_applies_updates(
         self,
@@ -395,20 +396,12 @@ class CLIPAttention(nn.Module):
         )
         self.num_heads_per_partition = divide(self.num_heads, self.tp_size)
 
-        if attn_cls == MMEncoderAttention:
-            self.attn = attn_cls(
-                self.num_heads_per_partition,
-                self.head_dim,
-                self.scale,
-                prefix=f"{prefix}.attn",
-            )
-        else:
-            self.attn = attn_cls(
-                self.num_heads_per_partition,
-                self.head_dim,
-                self.scale,
-                prefix=f"{prefix}.attn",
-            )
+        self.attn = attn_cls(
+            self.num_heads_per_partition,
+            self.head_dim,
+            self.scale,
+            prefix=f"{prefix}.attn",
+        )
 
     def forward(
         self,
@@ -561,6 +554,14 @@ class CLIPEncoder(nn.Module):
 
 
 class CLIPTextTransformer(nn.Module):
+    hf_to_vllm_mapper = WeightsMapper(
+        orig_to_new_stacked={
+            ".q_proj": (".qkv_proj", "q"),
+            ".k_proj": (".qkv_proj", "k"),
+            ".v_proj": (".qkv_proj", "v"),
+        }
+    )
+
     def __init__(
         self,
         config: CLIPTextConfig,
@@ -611,34 +612,19 @@ class CLIPTextTransformer(nn.Module):
         return last_hidden_state
 
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
-        stacked_params_mapping = [
-            # (param_name, shard_name, shard_id)
-            ("qkv_proj", "q_proj", "q"),
-            ("qkv_proj", "k_proj", "k"),
-            ("qkv_proj", "v_proj", "v"),
-        ]
-        params_dict = dict(self.named_parameters())
-        loaded_params: set[str] = set()
-
-        for name, loaded_weight in weights:
-            for param_name, weight_name, shard_id in stacked_params_mapping:
-                if weight_name not in name:
-                    continue
-                name = name.replace(weight_name, param_name)
-
-                param = params_dict[name]
-                weight_loader = param.weight_loader
-                weight_loader(param, loaded_weight, shard_id)
-                break
-            else:
-                param = params_dict[name]
-                weight_loader = getattr(param, "weight_loader", default_weight_loader)
-                weight_loader(param, loaded_weight)
-            loaded_params.add(name)
-        return loaded_params
+        loader = AutoWeightsLoader(self)
+        return loader.load_weights(weights, mapper=self.hf_to_vllm_mapper)
 
 
 class CLIPVisionTransformer(nn.Module):
+    hf_to_vllm_mapper = WeightsMapper(
+        orig_to_new_stacked={
+            ".q_proj": (".qkv_proj", "q"),
+            ".k_proj": (".qkv_proj", "k"),
+            ".v_proj": (".qkv_proj", "v"),
+        }
+    )
+
     def __init__(
         self,
         config: CLIPVisionConfig,
@@ -720,42 +706,21 @@ class CLIPVisionTransformer(nn.Module):
         return encoder_outputs
 
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
-        stacked_params_mapping = [
-            # (param_name, shard_name, shard_id)
-            ("qkv_proj", "q_proj", "q"),
-            ("qkv_proj", "k_proj", "k"),
-            ("qkv_proj", "v_proj", "v"),
-        ]
-        params_dict = dict(self.named_parameters())
-        loaded_params: set[str] = set()
-        layer_count = len(self.encoder.layers)
+        skip_prefixes: list[str] = []
+        if self.post_layernorm is None:
+            skip_prefixes.append("post_layernorm.")
+        loader = AutoWeightsLoader(self, skip_prefixes=skip_prefixes)
 
-        for name, loaded_weight in weights:
-            # post_layernorm is not needed in CLIPVisionModel
-            if name.startswith("post_layernorm") and self.post_layernorm is None:
-                continue
-
-            # omit layers when num_hidden_layers_override is set
-            if name.startswith("encoder.layers"):
-                layer_idx = int(name.split(".")[2])
-                if layer_idx >= layer_count:
+        # Drop layers beyond num_hidden_layers_override.
+        def _filter(ws):
+            for name, w in ws:
+                if name.startswith("encoder.layers.") and int(
+                    name.split(".")[2]
+                ) >= len(self.encoder.layers):
                     continue
+                yield name, w
 
-            for param_name, weight_name, shard_id in stacked_params_mapping:
-                if weight_name not in name:
-                    continue
-                name = name.replace(weight_name, param_name)
-
-                param = params_dict[name]
-                weight_loader = param.weight_loader
-                weight_loader(param, loaded_weight, shard_id)
-                break
-            else:
-                param = params_dict[name]
-                weight_loader = getattr(param, "weight_loader", default_weight_loader)
-                weight_loader(param, loaded_weight)
-            loaded_params.add(name)
-        return loaded_params
+        return loader.load_weights(_filter(weights), mapper=self.hf_to_vllm_mapper)
 
 
 class CLIPVisionModel(nn.Module):
@@ -775,7 +740,7 @@ class CLIPVisionModel(nn.Module):
             quant_config=quant_config,
             num_hidden_layers_override=num_hidden_layers_override,
             require_post_norm=require_post_norm,
-            prefix=f"{prefix}.vision_model",
+            prefix=maybe_prefix(prefix, "vision_model"),
         )
 
     def forward(
@@ -928,13 +893,11 @@ class CLIPEmbeddingModel(nn.Module, SupportsMultiModal, SupportsQuant):
         embed_input_ids: Callable[[torch.Tensor], torch.Tensor],
         *,
         is_multimodal: torch.Tensor | None,
-        handle_oov_mm_token: bool,
     ) -> torch.Tensor:
         inputs_embeds = super()._embed_text_input_ids(
             input_ids,
             embed_input_ids,
             is_multimodal=is_multimodal,
-            handle_oov_mm_token=handle_oov_mm_token,
         )
 
         # NOTE: inputs_embeds in model runner has size text_config.projection_dim
@@ -963,7 +926,6 @@ class CLIPEmbeddingModel(nn.Module, SupportsMultiModal, SupportsQuant):
         multimodal_embeddings: MultiModalEmbeddings | None = None,
         *,
         is_multimodal: torch.Tensor | None = None,
-        handle_oov_mm_token: bool = False,
     ) -> torch.Tensor:
         self._is_text_input = (
             multimodal_embeddings is None or len(multimodal_embeddings) == 0
@@ -977,7 +939,6 @@ class CLIPEmbeddingModel(nn.Module, SupportsMultiModal, SupportsQuant):
             input_ids,
             multimodal_embeddings=multimodal_embeddings,
             is_multimodal=is_multimodal,
-            handle_oov_mm_token=handle_oov_mm_token,
         )
 
     def embed_multimodal(self, **kwargs: object) -> MultiModalEmbeddings:

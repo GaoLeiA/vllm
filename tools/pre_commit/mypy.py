@@ -8,11 +8,9 @@ on files that have been changed. It groups files into different mypy calls
 based on their directory to avoid import following issues.
 
 Usage:
-    python tools/pre_commit/mypy.py <ci> <python_version> <changed_files...>
+    python tools/pre_commit/mypy.py <python_version> <changed_files...>
 
 Args:
-    ci: "1" if running in CI, "0" otherwise. In CI, follow_imports is set to
-        "silent" for the main group of files.
     python_version: Python version to use (e.g., "3.10") or "local" to use
         the local Python version.
     changed_files: List of changed files to check.
@@ -23,63 +21,91 @@ import sys
 
 import regex as re
 
-FILES = [
-    "vllm/*.py",
-    "vllm/assets",
-    "vllm/distributed",
-    "vllm/engine",
-    "vllm/entrypoints",
-    "vllm/executor",
-    "vllm/inputs",
-    "vllm/logging_utils",
-    "vllm/multimodal",
-    "vllm/platforms",
-    "vllm/plugins",
-    "vllm/renderers",
-    "vllm/tokenizers",
-    "vllm/transformers_utils",
-    "vllm/triton_utils",
-    "vllm/usage",
-    "vllm/utils",
-    "vllm/worker",
-    "vllm/v1/attention",
-    "vllm/v1/core",
-    "vllm/v1/engine",
-    "vllm/v1/executor",
-    "vllm/v1/metrics",
-    "vllm/v1/pool",
-    "vllm/v1/sample",
-    "vllm/v1/structured_output",
-    "vllm/v1/worker",
-]
-
 # After fixing errors resulting from changing follow_imports
-# from "skip" to "silent", move the following directories to FILES
+# from "skip" to "silent", remove its directory from SEPARATE_GROUPS.
 SEPARATE_GROUPS = [
     "tests",
-    # v0 related
-    "vllm/attention",
-    "vllm/compilation",
-    "vllm/lora",
-    "vllm/model_executor",
-    # v1 related
-    "vllm/v1/kv_offload",
-    "vllm/v1/spec_decode",
+    "tests/benchmarks",
+    "tests/compile/correctness_e2e",
+    "tests/config",
+    "tests/compile",
+    "tests/compile/fullgraph",
+    "tests/compile/fusions_e2e",
+    "tests/compile/passes",
+    "tests/distributed",
+    "tests/entrypoints/anthropic",
+    "tests/entrypoints/generate",
+    "tests/entrypoints/llm",
+    "tests/entrypoints/multimodal",
+    "tests/entrypoints/openai",
+    "tests/entrypoints/pooling",
+    "tests/entrypoints/serve",
+    "tests/entrypoints/speech_to_text",
+    "tests/entrypoints/tool_parsers",
+    "tests/entrypoints/unit_tests",
+    "tests/entrypoints/weight_transfer",
+    "tests/kernels",
+    "tests/kernels/attention",
+    "tests/kernels/core",
+    "tests/kernels/helion",
+    "tests/kernels/mamba",
+    "tests/kernels/moe",
+    "tests/kernels/quantization",
+    "tests/lora",
+    "tests/model_executor",
+    "tests/model_executor/layers",
+    "tests/model_executor/model_loader",
+    "tests/models",
+    "tests/models/test_initialization.py",
+    "tests/models/language",
+    "tests/models/multimodal",
+    "tests/models/quantization",
+    "tests/multimodal",
+    "tests/parser",
+    "tests/plugins_tests/gguf",
+    "tests/plugins_tests/lora_resolvers",
+    "tests/plugins/bge_m3_sparse_plugin",
+    "tests/plugins/prithvi_io_processor_plugin",
+    "tests/plugins/vllm_add_dummy_platform",
+    "tests/plugins/vllm_add_dummy_stat_logger",
+    "tests/plugins_tests",
+    "tests/quantization",
+    "tests/reasoning",
+    "tests/renderers",
+    "tests/samplers",
+    "tests/spec_decode",
+    "tests/tokenizers_",
+    "tests/tool_parsers",
+    "tests/tool_use",
+    "tests/transformers_utils",
+    "tests/utils_",
+    "tests/v1",
+    "tests/v1/attention",
+    "tests/v1/core",
+    "tests/v1/cudagraph",
+    "tests/v1/determinism",
+    "tests/v1/distributed",
+    "tests/v1/e2e",
+    "tests/v1/ec_connector",
+    "tests/v1/engine",
+    "tests/v1/executor",
+    "tests/v1/kv_connector",
+    "tests/v1/kv_offload",
+    "tests/v1/logits_processors",
+    "tests/v1/metrics",
+    "tests/v1/sample",
+    "tests/v1/shutdown",
+    "tests/v1/simple_kv_offload",
+    "tests/v1/spec_decode",
+    "tests/v1/streaming_input",
+    "tests/v1/structured_output",
+    "tests/v1/worker",
 ]
 
 # TODO(woosuk): Include the code from Megatron and HuggingFace.
 EXCLUDE = [
-    "vllm/engine/arg_utils.py",
-    "vllm/model_executor/parallel_utils",
     "vllm/model_executor/models",
     "vllm/model_executor/layers/fla/ops",
-    # Ignore triton kernels in ops.
-    "vllm/v1/attention/ops",
-]
-
-# Directories that should be checked with --strict
-STRICT_DIRS = [
-    "vllm/compilation",
 ]
 
 
@@ -94,7 +120,6 @@ def group_files(changed_files: list[str]) -> dict[str, list[str]]:
         A dictionary mapping file group names to lists of changed files.
     """
     exclude_pattern = re.compile(f"^{'|'.join(EXCLUDE)}.*")
-    files_pattern = re.compile(f"^({'|'.join(FILES)}).*")
     file_groups = {"": []}
     file_groups.update({k: [] for k in SEPARATE_GROUPS})
     for changed_file in changed_files:
@@ -102,20 +127,14 @@ def group_files(changed_files: list[str]) -> dict[str, list[str]]:
         if exclude_pattern.match(changed_file):
             continue
         # Group files by mypy call
-        if files_pattern.match(changed_file):
-            file_groups[""].append(changed_file)
-            continue
+        for directory in SEPARATE_GROUPS:
+            if re.match(f"^{directory}.*", changed_file):
+                file_groups[directory].append(changed_file)
+                break
         else:
-            for directory in SEPARATE_GROUPS:
-                if re.match(f"^{directory}.*", changed_file):
-                    file_groups[directory].append(changed_file)
-                    break
+            if changed_file.startswith(("vllm/", "tests/")):
+                file_groups[""].append(changed_file)
     return file_groups
-
-
-def is_strict_file(filepath: str) -> bool:
-    """Check if a file should be checked with strict mode."""
-    return any(filepath.startswith(strict_dir) for strict_dir in STRICT_DIRS)
 
 
 def mypy(
@@ -123,7 +142,6 @@ def mypy(
     python_version: str | None,
     follow_imports: str | None,
     file_group: str,
-    strict: bool = False,
 ) -> int:
     """
     Run mypy on the given targets.
@@ -135,7 +153,6 @@ def mypy(
         follow_imports: Value for the --follow-imports option or None to use
             the default mypy behavior.
         file_group: The file group name for logging purposes.
-        strict: If True, run mypy with --strict flag.
 
     Returns:
         The return code from mypy.
@@ -145,47 +162,24 @@ def mypy(
         args += ["--python-version", python_version]
     if follow_imports is not None:
         args += ["--follow-imports", follow_imports]
-    if strict:
-        args += ["--strict"]
     print(f"$ {' '.join(args)} {file_group}")
     return subprocess.run(args + targets, check=False).returncode
 
 
 def main():
-    ci = sys.argv[1] == "1"
-    python_version = sys.argv[2]
-    file_groups = group_files(sys.argv[3:])
+    python_version = sys.argv[1]
+    file_groups = group_files(sys.argv[2:])
 
     if python_version == "local":
         python_version = f"{sys.version_info.major}.{sys.version_info.minor}"
 
     returncode = 0
     for file_group, changed_files in file_groups.items():
-        follow_imports = None if ci and file_group == "" else "skip"
+        follow_imports = None if file_group == "" else "skip"
         if changed_files:
-            # Separate files into strict and non-strict groups
-            strict_files = [f for f in changed_files if is_strict_file(f)]
-            non_strict_files = [f for f in changed_files if not is_strict_file(f)]
-
-            # Run mypy on non-strict files
-            if non_strict_files:
-                returncode |= mypy(
-                    non_strict_files,
-                    python_version,
-                    follow_imports,
-                    file_group,
-                    strict=False,
-                )
-
-            # Run mypy on strict files with --strict flag
-            if strict_files:
-                returncode |= mypy(
-                    strict_files,
-                    python_version,
-                    follow_imports,
-                    f"{file_group} (strict)",
-                    strict=True,
-                )
+            returncode |= mypy(
+                changed_files, python_version, follow_imports, file_group
+            )
     return returncode
 
 

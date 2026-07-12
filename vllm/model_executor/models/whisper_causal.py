@@ -2,6 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import copy
 import functools
+import logging
 import math
 from dataclasses import replace
 from functools import partial
@@ -10,9 +11,9 @@ import torch
 import torch.nn.functional as F
 from torch import nn
 
-from vllm.attention.layer import Attention
 from vllm.config import CacheConfig, VllmConfig
 from vllm.distributed import get_tensor_model_parallel_world_size
+from vllm.model_executor.layers.attention import Attention
 from vllm.model_executor.layers.layernorm import RMSNorm
 from vllm.model_executor.layers.linear import (
     QKVParallelLinear,
@@ -22,6 +23,7 @@ from vllm.model_executor.layers.quantization import QuantizationConfig
 from vllm.model_executor.layers.rotary_embedding import get_rope
 from vllm.model_executor.models.mistral import MistralMLP
 from vllm.model_executor.models.whisper import WhisperPosEmbedType
+from vllm.utils.math_utils import cdiv
 from vllm.v1.attention.backend import (
     AttentionBackend,
     AttentionMetadata,
@@ -30,10 +32,19 @@ from vllm.v1.attention.backend import (
     subclass_attention_backend_with_overrides,
 )
 from vllm.v1.attention.backends.flash_attn import FlashAttentionBackend
+
+try:
+    from vllm.v1.attention.backends.rocm_aiter_fa import AiterFlashAttentionBackend
+except ImportError:
+    AiterFlashAttentionBackend = None
+from vllm.v1.attention.backends.rocm_attn import RocmAttentionBackend
+from vllm.v1.attention.backends.triton_attn import TritonAttentionBackend
 from vllm.v1.attention.selector import get_attn_backend
-from vllm.v1.kv_cache_interface import AttentionSpec
+from vllm.v1.kv_cache_interface import AttentionSpec, SlidingWindowSpec
 
 from .utils import make_layers
+
+logger = logging.getLogger(__name__)
 
 CausalRMSNorm = partial(RMSNorm, eps=1e-5)
 
@@ -101,10 +112,13 @@ class WhisperCausalConv1d(nn.Conv1d):
 
 @functools.lru_cache
 def create_whisper_attention_backend_with_block_pooling(
-    underlying_attn_backend: AttentionBackend, block_pool_size: int
+    underlying_attn_backend: AttentionBackend,
+    block_pool_size: int,
+    sliding_window: int | None = None,
 ) -> type[AttentionBackend]:
     prefix = "WhisperCausalAttentionWithBlockPooling_"
     underlying_builder = underlying_attn_backend.get_builder_cls()
+    underlying_impl = underlying_attn_backend.get_impl_cls()
 
     class WhisperCausalAttentionWithBlockPoolingBuilder(underlying_builder):  # type: ignore
         def __init__(
@@ -115,12 +129,30 @@ def create_whisper_attention_backend_with_block_pooling(
             device: torch.device,
         ):
             assert kv_cache_spec.num_kv_heads % block_pool_size == 0
-            kv_cache_spec = replace(
-                kv_cache_spec,
+            # Scale pooled-unit quantities back to unpooled (encoder-token)
+            # units for the underlying attention metadata: the KV cache spec
+            # counts blocks in pooled units, but the kernel runs on the
+            # `block_pool_size`x-expanded sequence built below.
+            spec_overrides = dict(
                 block_size=kv_cache_spec.block_size * block_pool_size,
                 num_kv_heads=kv_cache_spec.num_kv_heads // block_pool_size,
             )
+            if isinstance(kv_cache_spec, SlidingWindowSpec):
+                # The manager keeps `sliding_window` in pooled units; the kernel
+                # runs on the expanded sequence, so give it the model's window in
+                # unpooled units (`get_kv_cache_spec` sizes the pooled window so
+                # this window always stays resident).
+                assert sliding_window is not None
+                spec_overrides["sliding_window"] = sliding_window
+            kv_cache_spec = replace(kv_cache_spec, **spec_overrides)
             super().__init__(kv_cache_spec, layer_names, vllm_config, device)
+            # Override model_config-derived values with the actual
+            # encoder values from kv_cache_spec
+            self.num_heads_kv = kv_cache_spec.num_kv_heads
+            self.headdim = kv_cache_spec.head_size
+            # num_heads_q for the encoder is the same as num_kv_heads
+            # (no GQA in whisper encoder)
+            self.num_heads_q = kv_cache_spec.num_kv_heads
 
         def build(
             self,
@@ -132,8 +164,10 @@ def create_whisper_attention_backend_with_block_pooling(
             new_common_attn_metadata.query_start_loc *= block_pool_size
             new_common_attn_metadata.query_start_loc_cpu *= block_pool_size
             new_common_attn_metadata.seq_lens *= block_pool_size
-            new_common_attn_metadata._seq_lens_cpu *= block_pool_size
-            new_common_attn_metadata._num_computed_tokens_cpu *= block_pool_size
+            if new_common_attn_metadata._seq_lens_cpu is not None:
+                new_common_attn_metadata._seq_lens_cpu *= block_pool_size
+            if new_common_attn_metadata._num_computed_tokens_cpu is not None:
+                new_common_attn_metadata._num_computed_tokens_cpu *= block_pool_size
             new_common_attn_metadata.num_actual_tokens *= block_pool_size
             new_common_attn_metadata.max_query_len *= block_pool_size
             new_common_attn_metadata.max_seq_len *= block_pool_size
@@ -151,11 +185,74 @@ def create_whisper_attention_backend_with_block_pooling(
                 common_prefix_len, new_common_attn_metadata, fast_build
             )
 
-    if not issubclass(underlying_attn_backend, FlashAttentionBackend):
+    # NOTE: We need a custom impl so we can use the transformed slot_mapping
+    # computed by `WhisperCausalAttentionWithBlockPoolingBuilder` instead of
+    # the one from `forward_context.slot_mapping` (gpu_model_runner).
+    # This follows the same pattern as CrossAttentionImpl.
+    class WhisperCausalAttentionWithBlockPoolingImpl(underlying_impl):  # type: ignore[valid-type,misc]
+        def forward(
+            self,
+            layer: torch.nn.Module,
+            query: torch.Tensor,
+            key: torch.Tensor,
+            value: torch.Tensor,
+            kv_cache: torch.Tensor,
+            attn_metadata: AttentionMetadata,
+            output: torch.Tensor,
+            output_scale: torch.Tensor | None = None,
+            output_block_scale: torch.Tensor | None = None,
+        ) -> torch.Tensor:
+            if (
+                not underlying_attn_backend.forward_includes_kv_cache_update
+                and attn_metadata is not None
+                and layer.kv_sharing_target_layer_name is None
+                and key is not None
+                and value is not None
+            ):
+                self.do_kv_cache_update(
+                    layer, key, value, kv_cache, attn_metadata.slot_mapping
+                )
+
+            return super().forward(
+                layer,
+                query,
+                key,
+                value,
+                kv_cache,
+                attn_metadata,
+                output,
+                output_scale,
+                output_block_scale,
+            )
+
+    _SUPPORTED_BACKENDS = tuple(
+        b
+        for b in (
+            AiterFlashAttentionBackend,
+            FlashAttentionBackend,
+            RocmAttentionBackend,
+            TritonAttentionBackend,
+        )
+        if b is not None
+    )
+
+    if not issubclass(underlying_attn_backend, _SUPPORTED_BACKENDS):
         raise NotImplementedError(
             f"{underlying_attn_backend} is not yet supported."
             "Contributions to support more backends are much "
             "appreciated."
+        )
+
+    if not issubclass(underlying_attn_backend, FlashAttentionBackend):
+        logger.info(
+            "Using %s for Whisper causal attention with block pooling. "
+            "This backend was recently enabled for this model. "
+            "If you encounter any accuracy or performance issues, "
+            "please open an issue at "
+            "https://github.com/vllm-project/vllm/issues "
+            "with the [ROCm] tag so it can be triaged by the "
+            "appropriate team.",
+            underlying_attn_backend.get_name(),
         )
 
     attn_backend = subclass_attention_backend_with_overrides(
@@ -163,18 +260,20 @@ def create_whisper_attention_backend_with_block_pooling(
         attention_backend_cls=underlying_attn_backend,
         overrides={
             "get_builder_cls": lambda: WhisperCausalAttentionWithBlockPoolingBuilder,
+            "get_impl_cls": lambda: WhisperCausalAttentionWithBlockPoolingImpl,
             "get_kv_cache_shape": lambda num_blocks,
             block_size,
             num_kv_heads,
             head_size,
-            cache_dtype_str: (
-                2,
+            cache_dtype_str: underlying_attn_backend.get_kv_cache_shape(
                 num_blocks,
                 # we stretch each block by `block_pool_size`
                 block_size * block_pool_size,
                 num_kv_heads // block_pool_size,
                 head_size,
-            ),  # TODO: generalize to other backends
+                cache_dtype_str,
+            ),
+            "forward_includes_kv_cache_update": True,
         },
     )
 
@@ -207,20 +306,17 @@ class WhisperCausalAttentionWithBlockPooling(Attention):
 
         if cache_config is not None:
             kv_cache_dtype = cache_config.cache_dtype
-            block_size = cache_config.block_size
         else:
             kv_cache_dtype = "auto"
-            block_size = 16
 
         underlying_attn_backend = get_attn_backend(
             head_size,
             dtype,
             kv_cache_dtype,
-            block_size,
             attn_type=attn_type,
         )
         attn_backend = create_whisper_attention_backend_with_block_pooling(
-            underlying_attn_backend, block_pool_size
+            underlying_attn_backend, block_pool_size, per_layer_sliding_window
         )
 
         super().__init__(
@@ -247,6 +343,14 @@ class WhisperCausalAttentionWithBlockPooling(Attention):
             kv_cache_spec,
             num_kv_heads=self.block_pool_size * kv_cache_spec.num_kv_heads,
         )
+        if isinstance(kv_cache_spec, SlidingWindowSpec):
+            # The manager counts blocks in pooled units, so express the window in
+            # pooled units to avoid reserving `block_pool_size`x too many blocks.
+            # The `+1` is an eviction margin: block-aligned eviction only keeps
+            # `pooled - 1` pooled tokens, so this guarantees the kernel's full
+            # (unpooled) window still stays resident.
+            pooled = cdiv(kv_cache_spec.sliding_window, self.block_pool_size) + 1
+            kv_cache_spec = replace(kv_cache_spec, sliding_window=pooled)
         return kv_cache_spec
 
 
